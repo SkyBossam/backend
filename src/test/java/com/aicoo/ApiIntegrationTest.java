@@ -519,6 +519,7 @@ class ApiIntegrationTest {
         assertThat(call("GET",path+"?kind=feedback",owner,null,200).path("items")).hasSize(1);
         call("PUT","/children/"+other+"/care-history",owner,body,"other-note",404);
         call("GET",path+"?kind=cries",outsider,null,404);call("GET",path+"?kind=cries",null,null,401);
+        cries=call("GET",path+"?kind=cries",owner,null,200).path("items");
         call("DELETE","/devices/"+credentials.path("deviceId").asText(),owner,null,200);
         var next=new Pi(pi.keys(),call("POST","/pairing/start",null,proof(pi.keys(),"pair"),200));approve(owner,other,next,"rebound",200);
         assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).isEqualTo(cries);
@@ -533,7 +534,7 @@ class ApiIntegrationTest {
             deviceCall("/sky-eye/events",token,p("id",("a"+n).repeat(32),"episodeKey","part:"+n,"kind","cry_started","observedAt",began,"startedAt",began),200);
             if(n<2)deviceCall("/sky-eye/events",token,p("id",("e"+n).repeat(32),"episodeKey","part:"+n,"kind","cry_ended","observedAt",began.plusSeconds(30),"startedAt",began,"endedAt",began.plusSeconds(30)),200);
         }
-        var cries=call("GET",path+"?kind=cries",owner,null,200).path("items");assertThat(cries).hasSize(1);String event=cries.get(0).path("id").asText();
+        var cries=call("GET",path+"?kind=cries",owner,null,200).path("items");assertThat(cries).hasSize(3);assertThat(cries.get(0).path("alertId")).isEqualTo(cries.get(2).path("alertId"));String event=cries.get(0).path("id").asText();
         var body=changes();var note=p("eventId",event,"actions",List.of("hug"),"note","안아 주었어요","response","continues");body.put("feedback",List.of(note));
         var first=call("PUT",path,owner,body,"first-response",200).path("feedback").get(0);assertThat(first.path("version").asInt()).isEqualTo(1);
         note.put("version",1);note.put("response","reduced");note.put("actions",List.of("diaper"));
@@ -542,25 +543,18 @@ class ApiIntegrationTest {
         note.put("version",2);note.put("response","stopped");
         var saved=call("PUT",path,owner,body,"stopped-response",200);assertThat(call("PUT",path,owner,body,"stopped-response",200)).isEqualTo(saved);
         var persisted=call("GET",path+"?kind=feedback",owner,null,200).path("items").get(0);assertThat(persisted.path("version").asInt()).isEqualTo(3);assertThat(persisted.path("history")).hasSize(2);assertThat(persisted.path("response").asText()).isEqualTo("stopped");
-        // A replay of a segment from the same cry must not reopen an alert.
+        // Replaying the same physical interval cannot reopen a handled alert.
         deviceCall("/sky-eye/events",token,p("id","d".repeat(64),"episodeKey","part:2","kind","cry_started","observedAt",at.plusSeconds(80),"startedAt",at.plusSeconds(80)),200);
-        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).hasSize(1);
-        Instant ongoing=Instant.now().plusSeconds(1);
-        deviceCall("/sky-eye/events",token,p("id","9".repeat(64),"episodeKey","unbroken","kind","cry_started","observedAt",ongoing,"startedAt",ongoing),200);
-        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).hasSize(1);
-        deviceCall("/sky-eye/events",token,p("id","8".repeat(64),"episodeKey","part:2","kind","cry_ended","observedAt",ongoing.plusSeconds(1),"startedAt",at.plusSeconds(80),"endedAt",ongoing.plusSeconds(1)),200);
-        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items").get(0).path("durationSec").isNull()).isTrue();
-        deviceCall("/sky-eye/events",token,p("id","7".repeat(64),"episodeKey","unbroken","kind","cry_ended","observedAt",ongoing.plusSeconds(2),"startedAt",ongoing,"endedAt",ongoing.plusSeconds(2)),200);
-        Instant next=ongoing.plusSeconds(3);
-        deviceCall("/sky-eye/events",token,p("id","f".repeat(64),"episodeKey","next:cry","kind","cry_started","observedAt",next,"startedAt",next),200);
-        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).hasSize(2);
+        var after=call("GET",path+"?kind=cries",owner,null,200).path("items");assertThat(after).hasSize(3);
+        assertThat(after.get(0).path("alertClosed").asBoolean()).isTrue();
+        assertThat(after.get(0).path("durationSec").isNull()).isTrue();
         assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).isEmpty();
     }
     @Test void repeatedWorkerCrySendsOneNotificationUntilQuietAndHandled()throws Exception{
         var owner=usernameUser();UUID child=uuid(child(owner),"id"),camera=camera(owner,child);Instant at=Instant.now().minusSeconds(300);
         var first=detection(owner,child,camera,"cry","caution",at);
         var repeat=detection(owner,child,camera,"cry","immediate",at.plusSeconds(120));
-        assertThat(repeat.path("id")).isEqualTo(first.path("id"));assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).hasSize(1);
+        assertThat(repeat.path("id")).isNotEqualTo(first.path("id"));assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).hasSize(1);
         var body=changes();body.put("feedback",List.of(p("eventId",first.path("id").asText(),"actions",List.of("hug"),"note","","response","stopped")));
         call("PUT","/children/"+child+"/care-history",owner,body,"handled",200);
         var next=detection(owner,child,camera,"cry","caution",Instant.now().plusSeconds(1));assertThat(next.path("id")).isNotEqualTo(first.path("id"));
@@ -574,6 +568,35 @@ class ApiIntegrationTest {
             for(var task:tasks)task.get(10,TimeUnit.SECONDS);
         }
         assertThat(call("GET","/children/"+child+"/care-history?kind=cries",owner,null,200).path("items")).hasSize(1);
+    }
+    @Test void candidateIdsCanDifferAndBriefQuietDoesNotCreateAnotherOccurrence()throws Exception {
+        var owner=usernameUser();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"physical",200);String token=poll(pi,200).path("accessToken").asText();
+        Instant at=Instant.now().minusSeconds(300);
+        int[] seconds={0,30,32,60,80,100};
+        for(int i=0;i<seconds.length;i++) {
+            var signal=p("id",Integer.toHexString(i+1).repeat(64),"episodeKey","independent:"+i,"kind",i%2==0?"cry_started":"cry_ended","observedAt",at.plusSeconds(seconds[i]));
+            deviceCall("/sky-eye/events",token,signal,200);deviceCall("/sky-eye/events",token,signal,200);
+        }
+        var records=call("GET","/children/"+child+"/care-history?kind=cries",owner,null,200).path("items");
+        assertThat(records).hasSize(2);assertThat(records.get(0).path("durationSec").asInt()).isEqualTo(20);assertThat(records.get(1).path("durationSec").asInt()).isEqualTo(60);
+        assertThat(records.get(0).path("alertId")).isEqualTo(records.get(1).path("alertId"));assertThat(records.get(0).path("alertOccurrences").asInt()).isEqualTo(2);
+        // Out-of-order raw end then start, with unrelated IDs, also forms one interval.
+        deviceCall("/sky-eye/events",token,p("id","a".repeat(64),"episodeKey","late-end","kind","cry_ended","observedAt",at.plusSeconds(150)),200);
+        deviceCall("/sky-eye/events",token,p("id","b".repeat(64),"episodeKey","late-start","kind","cry_started","observedAt",at.plusSeconds(120)),200);
+        records=call("GET","/children/"+child+"/care-history?kind=cries",owner,null,200).path("items");assertThat(records).hasSize(3);assertThat(records.get(0).path("durationSec").asInt()).isEqualTo(30);
+    }
+    @Test void audioSnapshotPersistsWithoutTrainingFeedbackAndDisconnectIsNotQuiet()throws Exception {
+        var owner=usernameUser();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"analysis",200);String token=poll(pi,200).path("accessToken").asText();
+        Instant at=Instant.now().minusSeconds(2);String path="/children/"+child+"/care-history?kind=cries";
+        deviceCall("/sky-eye/events",token,p("id","a".repeat(64),"episodeKey","live","kind","cry_started","observedAt",at),200);
+        deviceCall("/sky-eye/status",token,skyStatus(at.plusSeconds(1),false,0,0,UUID.randomUUID()),200);
+        var first=call("GET",path,owner,null,200).path("items").get(0);assertThat(first.path("audioAnalysis").path("babyCryScore").asDouble()).isEqualTo(0.4);
+        assertThat(first.path("cause").asText()).isEqualTo("원인 미분류");assertThat(first.path("analysisAvailable").asBoolean()).isFalse();
+        var unavailable=skyStatus(at.plusSeconds(2),false,0,0,UUID.randomUUID());unavailable.put("audio",p("available",false,"observedAt",at.plusSeconds(2),"cryDetected",false));
+        deviceCall("/sky-eye/status",token,unavailable,200);
+        var interrupted=call("GET",path,owner,null,200).path("items").get(0);assertThat(interrupted.path("observationState").asText()).isEqualTo("interrupted");assertThat(interrupted.path("durationSec").isNull()).isTrue();
+        assertThat(interrupted.path("audioAnalysis")).isEqualTo(first.path("audioAnalysis"));assertThat(interrupted.path("alertClosed").asBoolean()).isFalse();
+        assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).hasSize(1);
     }
     @Test void dailyRecordsPersistPaginateAndRejectStaleAtomicEdits()throws Exception{
         var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");String path="/children/"+child+"/care-history";

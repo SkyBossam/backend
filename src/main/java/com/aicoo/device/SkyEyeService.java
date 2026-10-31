@@ -3,6 +3,7 @@ package com.aicoo.device;
 import com.aicoo.common.*;
 import com.aicoo.monitoring.MonitoringService;
 import com.aicoo.monitoring.CameraRelay;
+import com.aicoo.notification.Outbox;
 import com.aicoo.security.Policy;
 import com.aicoo.security.Policy.Actor;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -50,9 +51,9 @@ public class SkyEyeService {
         @NotNull @Pattern(regexp="feed|diaper|hold|unknown|self") String action) {}
     public record Receipt(boolean ok) {}
     private final Db db; private final PairingService pairing; private final Policy policy;
-    private final MonitoringService monitoring; private final ObjectMapper mapper; private final CameraRelay camera;
-    public SkyEyeService(Db db,PairingService pairing,Policy policy,MonitoringService monitoring,ObjectMapper mapper,CameraRelay camera) {
-        this.db=db;this.pairing=pairing;this.policy=policy;this.monitoring=monitoring;this.mapper=mapper;this.camera=camera;
+    private final MonitoringService monitoring; private final ObjectMapper mapper; private final CameraRelay camera; private final Outbox outbox;
+    public SkyEyeService(Db db,PairingService pairing,Policy policy,MonitoringService monitoring,ObjectMapper mapper,CameraRelay camera,Outbox outbox) {
+        this.db=db;this.pairing=pairing;this.policy=policy;this.monitoring=monitoring;this.mapper=mapper;this.camera=camera;this.outbox=outbox;
     }
     private static boolean fresh(Instant at,Instant now,int seconds) {
         return at!=null&&!at.isBefore(now.minusSeconds(seconds))&&!at.isAfter(now.plusSeconds(5));
@@ -90,6 +91,7 @@ public class SkyEyeService {
         if(previous.isPresent()&&body.observedAt().isBefore(instant(previous.get(),"observed_at")))throw ApiException.conflict("STALE_MODEL_STATUS");
         var current=effective(body,Instant.now());
         db.update("INSERT INTO sky_eye_status(device_id,observed_at,body) VALUES(:id,:at,cast(:body as jsonb)) ON CONFLICT(device_id) DO UPDATE SET observed_at=:at,body=cast(:body as jsonb),received_at=now()",p("id",deviceId,"at",body.observedAt(),"body",db.json(current)));
+        observeCry(deviceId,current.audio());
         // Connection/analysis freshness never creates a playable video stream.
         var safety=safety(current);var v=current.video();
         Double confidence=confident(v.bodyConfidence())?v.bodyConfidence():confident(v.faceConfidence())?v.faceConfidence():null;
@@ -104,8 +106,16 @@ public class SkyEyeService {
         if(existing.isPresent()) {
             if(!mapper.valueToTree(existing.get().get("body")).equals(mapper.valueToTree(body)))throw ApiException.conflict("MODEL_EVENT_CONFLICT");
         } else db.update("INSERT INTO sky_eye_events(device_id,event_id,observed_at,body) VALUES(:device,:event,:at,cast(:body as jsonb))",args);
-        // Historical import is a record, never an outbox/push notification.
+        var status=db.one("SELECT body FROM sky_eye_status WHERE device_id=:id",p("id",device.get("id")));
+        if(status.isPresent())observeCry(id(device,"id"),effective(mapper.convertValue(status.get().get("body"),Status.class),Instant.now()).audio());
+        if(body.kind().equals("cry_started")&&fresh(body.observedAt(),Instant.now(),30)) {
+            db.one("SELECT e.* FROM cry_episode_links l JOIN detection_events e ON e.id=l.event_id WHERE l.device_id=:device AND l.episode_key=:key AND NOT e.cry_retired",p("device",device.get("id"),"key",body.episodeKey())).ifPresent(e->outbox.enqueue(e,"detection.created"));
+        }
+        // Historical imports never dispatch fresh notifications.
         return p("accepted",true,"duplicate",existing.isPresent());
+    }
+    private void observeCry(UUID device,Audio audio) {
+        db.list("SELECT observe_sky_eye_cry(:device,cast(:audio as jsonb))",p("device",device,"audio",db.json(audio)));
     }
     public Object snapshot(Actor actor,UUID child) {
         policy.require(actor,child,"monitor:live");policy.require(actor,child,"cry:read");policy.require(actor,child,"detection:read");

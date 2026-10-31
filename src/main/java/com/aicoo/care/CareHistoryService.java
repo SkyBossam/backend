@@ -53,7 +53,7 @@ public class CareHistoryService {
         var position=cursors.decode(context,cursor);
         var params=p("ws",actor.workspaceId(),"child",child,"member",actor.membershipId(),"limit",size+1);
         String source=switch(kind) {
-            case "cries" -> "SELECT * FROM detection_events WHERE workspace_id=:ws AND child_id=:child AND type='cry'";
+            case "cries" -> "SELECT e.*,g.closed_at AS alert_closed_at,(SELECT count(*) FROM detection_events x WHERE x.cry_alert_id=e.cry_alert_id AND NOT x.cry_retired) AS alert_occurrences FROM detection_events e LEFT JOIN cry_alert_groups g ON g.id=e.cry_alert_id WHERE e.workspace_id=:ws AND e.child_id=:child AND e.type='cry' AND NOT e.cry_retired";
             case "routines" -> "SELECT *,coalesce(scheduled_at,created_at) AS record_time FROM routines WHERE workspace_id=:ws AND child_id=:child AND deleted_at IS NULL";
             case "sleepRecords" -> "SELECT * FROM sleep_records WHERE workspace_id=:ws AND child_id=:child AND deleted_at IS NULL";
             default -> "SELECT f.*,e.child_id FROM care_feedback f JOIN detection_events e ON e.id=f.event_id WHERE f.workspace_id=:ws AND e.child_id=:child AND e.type='cry' AND f.membership_id=:member";
@@ -69,13 +69,23 @@ public class CareHistoryService {
 
     private Map<String,Object> recordView(String kind,Map<String,Object> row) {
         return switch(kind) {
-            case "cries" -> p("id",row.get("id"),"childId",row.get("child_id"),"sourceId",row.get("source_id"),"lastObservedAt",row.get("last_observed_at"),"startedAt",row.get("started_at"),
-                "durationSec",row.get("ended_at")==null?null:Duration.between(instant(row,"started_at"),instant(row,"ended_at")).getSeconds(),
-                "cause","원인 확인 필요","analysisAvailable",false);
+            case "cries" -> cryView(row);
             case "routines" -> view(row,"id","child_id","type","title","note","scheduled_at","ended_at","status","version");
             case "sleepRecords" -> view(row,"id","child_id","started_at","ended_at","version");
             default -> view(row,"event_id","child_id","actions","note","response","created_at","updated_at","version","history");
         };
+    }
+
+    private Map<String,Object> cryView(Map<String,Object> row) {
+        var causes=db.list("SELECT cause_key,label,reason FROM cause_candidates WHERE event_id=:id ORDER BY rank,id",p("id",row.get("id"))).stream().map(r->view(r,"cause_key","label","reason")).toList();
+        var recommendations=db.list("SELECT action_key,title,explanation,instructions FROM recommendations WHERE event_id=:id ORDER BY priority,id",p("id",row.get("id"))).stream().map(r->view(r,"action_key","title","explanation","instructions")).toList();
+        boolean ended=row.get("ended_at")!=null;
+        boolean interrupted="interrupted".equals(row.get("cry_end_reason"))||!ended&&instant(row,"last_observed_at").isBefore(Instant.now().minusSeconds(8));
+        String state=ended?(Set.of("input_gap","service_stopped","interrupted").contains(Objects.toString(row.get("cry_end_reason"),""))?"interrupted":"ended"):interrupted?"interrupted":"crying";
+        return p("id",row.get("id"),"childId",row.get("child_id"),"sourceId",row.get("source_id"),"lastObservedAt",row.get("last_observed_at"),"startedAt",row.get("started_at"),"endedAt",row.get("ended_at"),
+            "durationSec",ended&&!state.equals("interrupted")?Duration.between(instant(row,"started_at"),instant(row,"ended_at")).getSeconds():null,
+            "observationState",state,"alertId",row.get("cry_alert_id"),"alertClosed",row.get("alert_closed_at")!=null,"alertOccurrences",row.get("alert_occurrences"),
+            "cause",causes.isEmpty()?"원인 미분류":causes.getFirst().get("label"),"analysisAvailable",!causes.isEmpty(),"audioAnalysis",row.get("cry_analysis"),"causes",causes,"recommendations",recommendations);
     }
 
     @Transactional
@@ -131,7 +141,7 @@ public class CareHistoryService {
         db.update("UPDATE "+table+" SET deleted_at=now(),updated_at=now(),version=version+1 WHERE id=:id",p("id",r.id()));
     }
     private Map<String,Object> saveFeedback(Actor actor,UUID child,FeedbackWrite f) {
-        var allowed=Set.of("sleep","hug","noise","posture","diaper","none");
+        var allowed=Set.of("sleep","hug","noise","posture","diaper","feed","none");
         if(f.actions().stream().anyMatch(a->!allowed.contains(a)&&!(a.startsWith("other:")&&!a.substring(6).isBlank()))||new HashSet<>(f.actions()).size()!=f.actions().size()||(f.actions().contains("none")&&f.actions().size()>1))throw ApiException.invalid("INVALID_CARE_ACTIONS");
         db.required("SELECT id FROM detection_events WHERE id=:id AND workspace_id=:ws AND child_id=:child AND type='cry' FOR UPDATE",p("id",f.eventId(),"ws",actor.workspaceId(),"child",child),"EVENT_NOT_ACCESSIBLE");
         var params=p("event",f.eventId(),"member",actor.membershipId(),"ws",actor.workspaceId(),"child",child);

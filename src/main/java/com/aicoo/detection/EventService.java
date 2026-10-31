@@ -44,16 +44,11 @@ public class EventService {
         }
         boolean verifiable=body.verifiable()&&body.confidence()!=null&&body.confidence()>=threshold&&!Set.of("camera_obstructed","connection_lost").contains(body.type());
         String severity=verifiable?body.severity():"unknown",status=verifiable?"new":"unverifiable";
-        // Other risks keep their short grouping window; cries wait for caregiver handling below.
+        // Other risks keep their short grouping window.
         var group=db.one("SELECT * FROM detection_events WHERE workspace_id=:ws AND child_id=:child AND source_id=:s AND type=:type AND status IN ('new','acknowledged','checking','unverifiable') AND ended_at IS NULL AND last_observed_at BETWEEN :since AND :at AND verifiable=:verifiable ORDER BY last_observed_at DESC LIMIT 1 FOR UPDATE",p("ws",body.workspaceId(),"child",body.childId(),"s",body.sourceId(),"type",body.type(),"since",body.startedAt().minusSeconds(15),"at",body.startedAt(),"verifiable",verifiable));
         if("cry".equals(body.type())) {
-            group=db.one("SELECT e.* FROM detection_events e WHERE e.workspace_id=:ws AND e.child_id=:child AND e.source_id=:s AND e.type='cry' ORDER BY e.started_at DESC,e.id DESC LIMIT 1 FOR UPDATE",p("ws",body.workspaceId(),"child",body.childId(),"s",body.sourceId()));
-            if(group.isPresent()) {
-                var latest=group.get();
-                var response=db.one("SELECT response,updated_at FROM care_feedback WHERE event_id=:e ORDER BY updated_at DESC,id DESC LIMIT 1",p("e",latest.get("id")));
-                boolean stopped=response.isPresent()&&"stopped".equals(response.get().get("response"));
-                if(body.startedAt().isBefore(instant(latest,"started_at")) || stopped&&latest.get("ended_at")!=null&&body.startedAt().isAfter(instant(latest,"ended_at"))&&body.startedAt().isAfter(instant(response.get(),"updated_at")))group=Optional.empty();
-            }
+            // Only contiguous physical observations merge; caregiver feedback never changes duration.
+            group=db.one("SELECT * FROM detection_events WHERE source_id=:s AND child_id=:child AND type='cry' AND NOT cry_retired AND started_at<=:at AND ((ended_at IS NULL AND cry_end_reason IS DISTINCT FROM 'interrupted' AND last_observed_at>=:fresh) OR (ended_at>=:quiet AND ended_at<=:at)) ORDER BY started_at DESC LIMIT 1 FOR UPDATE",p("s",body.sourceId(),"child",body.childId(),"at",body.startedAt(),"fresh",body.startedAt().minusSeconds(8),"quiet",body.startedAt().minusSeconds(3)));
         }
         UUID eventId;
         if(group.isPresent()) {
@@ -84,7 +79,7 @@ public class EventService {
         var params=p("ws",actor.workspaceId(),"child",child,"limit",size+1);String where="";
         if(type!=null){where+=" AND type=:type";params.put("type",type);}
         if(position!=null){where+=" AND (started_at,id)<(:time,:cursorId)";params.put("time",position.time());params.put("cursorId",position.id());}
-        var rows=db.list("SELECT * FROM detection_events WHERE workspace_id=:ws AND child_id=:child"+where+" ORDER BY started_at DESC,id DESC LIMIT :limit",params);
+        var rows=db.list("SELECT * FROM detection_events WHERE workspace_id=:ws AND child_id=:child AND NOT cry_retired"+where+" ORDER BY started_at DESC,id DESC LIMIT :limit",params);
         boolean more=rows.size()>size;var page=rows.subList(0,Math.min(size,rows.size()));
         String next=more?cursors.encode(context,instant(page.getLast(),"started_at"),id(page.getLast(),"id")):null;
         audit.record(actor.workspaceId(),actor.userId(),"event.list","child",child);

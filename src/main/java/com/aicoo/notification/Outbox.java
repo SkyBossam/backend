@@ -17,6 +17,7 @@ public class Outbox {
     /** Must commit in the same transaction as the domain event. Recipients are snapshotted now. */
     @Transactional(propagation=Propagation.MANDATORY)
     public void enqueue(Map<String,Object> event,String topic) {
+        if("cry".equals(event.get("type")) && db.update("UPDATE cry_alert_groups SET notified=true WHERE id=:id AND NOT notified AND closed_at IS NULL",p("id",event.get("cry_alert_id")))==0)return;
         UUID workspace=id(event,"workspace_id"),child=id(event,"child_id");
         var recipients=new ArrayList<UUID>();
         for(var row:db.list("SELECT id FROM memberships WHERE workspace_id=:ws AND status='active'",p("ws",workspace))) {

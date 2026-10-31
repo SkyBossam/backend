@@ -33,7 +33,10 @@ def main():
             body = {"routines": [], "deletedRoutines": [], "sleepRecords": [], "deletedSleepRecords": [], "feedback": [note]}
             saved = request(path, body, token, workspace, "PUT")["feedback"][0]
             segment(1)
-            assert len(request(path+"?kind=cries", token=token, workspace=workspace)["items"]) == 1
+            occurrences = request(path+"?kind=cries", token=token, workspace=workspace)["items"]
+            assert len(occurrences) == 2
+            assert occurrences[0]["alertId"] == occurrences[1]["alertId"]
+            assert all(c["durationSec"] == 30 for c in occurrences)
             note.update(version=saved["version"], actions=["diaper"], response="stopped", note="Confirmed quiet")
             request(path, body, token, workspace, "PUT")
             login = request("/auth/login", {"username": username, "password": password})
@@ -41,7 +44,22 @@ def main():
             assert history["version"] == 2 and history["response"] == "stopped"
             assert len(history["history"]) == 1 and history["history"][0]["response"] == "continues"
             assert history["history"][0]["actions"] == ["hug"]
-            print("PASS: repeated cry -> one waiting record -> continued care -> stopped confirmation -> history restored after login.")
+            # A newly observed cry starts a fresh alert after handling. Missing raw
+            # end events can still close on three seconds of fresh quiet observations.
+            started = datetime.now(timezone.utc)
+            agent.request("/device/sky-eye/events", {"id": sha256(b"fresh-live-cry").hexdigest(), "episodeKey": "fresh-live-cry", "kind": "cry_started", "observedAt": started.isoformat()}, device=True)
+            def status(seconds, crying):
+                at = (started + timedelta(seconds=seconds)).isoformat()
+                agent.request("/device/sky-eye/status", {"observedAt": at, "video": {"available": False, "state": "unavailable"}, "audio": {"available": True, "observedAt": at, "cryDetected": crying, "babyCryScore": 0.4 if crying else 0.01, "cryingScore": 0.1 if crying else 0.01}}, device=True)
+            status(0, True)
+            status(1, False)
+            status(4, False)
+            records = request(path+"?kind=cries", token=login["accessToken"], workspace=workspace)["items"]
+            assert len(records) == 3 and records[0]["durationSec"] == 1
+            assert records[0]["audioAnalysis"]["babyCryScore"] == 0.4
+            assert not records[0]["alertClosed"] and records[0]["alertId"] != records[1]["alertId"]
+            assert records[1]["alertClosed"] and records[2]["alertClosed"]
+            print("PASS: separate cry records / single pending alert / versioned care history / new alert after handling / quiet-status closure / preserved analysis.")
         finally:
             request(f"/devices/{device}", token=token, workspace=workspace, method="DELETE")
 
