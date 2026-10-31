@@ -9,7 +9,7 @@ $archive = [IO.Compression.ZipArchive]::new([IO.File]::Open($archivePath, [IO.Fi
 try {
     $selectedFiles = @()
     foreach ($folder in @('src', 'docs', 'clients', 'scripts', 'raspberry-pi', '.mvn', '.github')) {
-        $selectedFiles += Get-ChildItem -LiteralPath (Join-Path $projectRoot $folder) -File -Recurse | Where-Object { $_.Extension -ne '.pyc' -and $_.FullName -notmatch '[\\/]__pycache__[\\/]' -and $_.Name -notin @('identity.pem','credential.json','pending.json','server.json','agent.lock','bridge-cursor.json','bridge-commands.json','bridge-errors.json','bridge-binding.json','launcher.json') }
+        $selectedFiles += Get-ChildItem -LiteralPath (Join-Path $projectRoot $folder) -File -Recurse | Where-Object { $_.Extension -ne '.pyc' -and $_.FullName -notmatch '[\\/](__pycache__|aicoo-backups)[\\/]' -and $_.Name -notin @('identity.pem','credential.json','pending.json','server.json','agent.lock','bridge-cursor.json','bridge-commands.json','bridge-errors.json','bridge-binding.json','launcher.json','profile-reset.json') }
     }
     foreach ($file in @('pom.xml','mvnw','mvnw.cmd','.gitignore','.gitattributes','.dockerignore','.env.example','Dockerfile','compose.yaml','README.md')) {
         $selectedFiles += Get-Item -LiteralPath (Join-Path $projectRoot $file)

@@ -43,6 +43,9 @@ class LauncherTests(unittest.TestCase):
         with patch.object(agent, 'authenticate', side_effect=ApiError(401, 'DEVICE_NOT_PAIRED')), patch.object(agent, 'pair') as pair:
             with self.assertRaises(ValueError): ensure_paired(agent)
         pair.assert_not_called()
+        with patch.object(agent, 'authenticate', side_effect=ApiError(401, 'DEVICE_NOT_PAIRED')), patch.object(agent, 'pair') as pair:
+            ensure_paired(agent, fresh=True)
+        pair.assert_called_once()
 
     def test_config_is_saved_atomically_without_credentials(self):
         path = self.root / 'config/launcher.json'; settings = {'api_url': 'https://api.example', 'sky_eye_dir': 'model'}
@@ -67,6 +70,19 @@ class LauncherTests(unittest.TestCase):
         pair.assert_not_called(); bridge.return_value.bind.assert_called_once()
         bridge.return_value.run.assert_called_once_with(True,8765,True)
         self.assertEqual(json.loads(config.read_text())['api_url'],agent.api_url)
+
+    def test_reassignment_archives_before_binding_or_starting_transmission(self):
+        order = []
+        argv = ['start_aicoo.py', '--api-url', 'http://127.0.0.1:8080',
+                '--state-dir', self.args.state_dir, '--sky-eye-dir', self.args.sky_eye_dir,
+                '--config', str(self.root / 'launcher.json'), '--fresh-profile', '--once']
+        model = Path(self.args.sky_eye_dir); model.mkdir(); (model / 'start-all.sh').write_text('fixture')
+        with patch('sys.argv', argv), patch('start_aicoo.health'), patch('start_aicoo.ensure_paired', side_effect=lambda *a, **k: order.append('pair')), patch('start_aicoo.fresh_profile', side_effect=lambda *a: order.append('archive') or 'sky-eye-objects'), patch('start_aicoo.start_model', side_effect=lambda *a, **k: order.append('model')) as start, patch('start_aicoo.Bridge') as bridge:
+            bridge.return_value.bind.side_effect = lambda: order.append('bind')
+            bridge.return_value.run.side_effect = lambda *a: order.append('send')
+            self.assertEqual(main(), 0)
+        self.assertEqual(order, ['pair', 'archive', 'bind', 'model', 'send'])
+        start.assert_called_once_with(str(model.resolve()), camera='sky-eye-objects')
 
 
 if __name__ == '__main__': unittest.main()

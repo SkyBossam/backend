@@ -144,10 +144,13 @@ class Bridge:
         self.commands = agent.read('bridge-commands.json') or {}
 
     def bind(self):
+        reset = self.agent.read('profile-reset.json')
+        if reset and reset.get('phase') != 'complete':
+            raise ValueError('Profile reset is unfinished. Run start-aicoo.sh --fresh-profile to resume before sending data.')
         binding = self.agent.read('bridge-binding.json')
         device = self.agent.credential['deviceId']
         if binding and binding['deviceId'] != device and binding['root'] == str(self.root):
-            raise ValueError('Child/device binding changed. Use --sky-eye-dir with a new deployment and fresh output/personal profile; old child data must not be forwarded.')
+            raise ValueError('Child/device binding changed. Run start-aicoo.sh --fresh-profile to back up the previous records and start fresh, or use a separate fresh model deployment.')
         self.agent.write('bridge-binding.json', {'deviceId': device, 'root': str(self.root)})
 
     def status(self):

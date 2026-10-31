@@ -21,3 +21,5 @@ bridge-commands.json
 bridge-errors.json
 bridge-binding.json
 launcher.json
+profile-reset.json
+aicoo-backups/

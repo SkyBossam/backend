@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from urllib.request import build_opener
 from aicoo_device import Agent, AgentLock, ApiError, NoRedirect
 from sky_eye_bridge import Bridge
+from model_rebind import fresh_profile
 
 
 def read_config(path):
@@ -95,7 +96,7 @@ def wait_for_server(address, once=False):
             time.sleep(3)
 
 
-def ensure_paired(agent):
+def ensure_paired(agent, fresh=False):
     if (agent.state_dir / 'identity.pem').exists():
         agent.load_key()
         try:
@@ -106,21 +107,24 @@ def ensure_paired(agent):
             if error.code != 'DEVICE_NOT_PAIRED':
                 raise
             # An unlink/reassignment must not silently transfer a child's old profile.
-            if agent.read('bridge-binding.json'):
-                raise ValueError('This device was unlinked in the app. To assign it to another child, prepare a fresh model profile and explicitly register it using pair.') from None
+            if agent.read('bridge-binding.json') and not fresh:
+                raise ValueError('This device was unlinked. Run start-aicoo.sh --fresh-profile to approve a new connection, back up the previous model records, and start fresh.') from None
     print('First-time setup: enter the code below on the device connection page in the aicoo PC app, then approve it.', flush=True)
     agent.pair()
 
 
-def start_model(root):
+def start_model(root, camera=None):
     root = Path(root)
     if not (root / 'start-all.sh').is_file():
         raise ValueError('Model launcher not found: %s/start-all.sh (set the installation path with --sky-eye-dir)' % root)
     if sys.platform != 'linux':
         raise ValueError('Automatic model startup requires a Linux user session on the Raspberry Pi.')
     # Start idempotently; do not restart a running model or switch its selected variant.
-    active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'sky-eye-objects'], check=False).returncode == 0
-    camera = 'sky-eye-objects' if active else 'sky-eye'
+    if camera is None:
+        active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'sky-eye-objects'], check=False).returncode == 0
+        camera = 'sky-eye-objects' if active else 'sky-eye'
+    if camera not in ('sky-eye', 'sky-eye-objects'):
+        raise ValueError('Invalid model service variant.')
     units = [camera, 'sky-eye-cry', 'sky-eye-export']
     subprocess.run(['systemctl', '--user', 'start'] + units, check=True)
     for unit in units:
@@ -135,10 +139,13 @@ def main():
     parser.add_argument('--sky-eye-dir')
     parser.add_argument('--preview-port', type=int)
     parser.add_argument('--config', default='~/.config/aicoo/launcher.json')
+    parser.add_argument('--fresh-profile', action='store_true', help='After reassignment, back up old model records locally and start with an empty personal profile')
     parser.add_argument('--no-start-model', action='store_true', help='Use a model that is already running separately')
     parser.add_argument('--no-camera', action='store_true', help='Send analysis data without camera preview frames')
     parser.add_argument('--once', action='store_true', help='Check the connection and send data once')
     args = parser.parse_args()
+    if args.fresh_profile and args.no_start_model:
+        parser.error('--fresh-profile must manage the model services; do not combine it with --no-start-model')
     try:
         path = Path(args.config).expanduser()
         settings = resolve_settings(args, read_config(path), os.environ)
@@ -149,11 +156,12 @@ def main():
         agent = Agent(settings['api_url'], settings['state_dir'], allow_http=settings['api_url'].startswith('http://'))
         with AgentLock(agent.state_dir):
             save_config(path, settings)
-            ensure_paired(agent)
+            ensure_paired(agent, fresh=args.fresh_profile)
+            camera = fresh_profile(agent, settings['sky_eye_dir']) if args.fresh_profile else None
             bridge = Bridge(agent, settings['sky_eye_dir'])
             bridge.bind()  # Verify child binding before starting the model or camera relay.
             if not args.no_start_model:
-                start_model(settings['sky_eye_dir'])
+                start_model(settings['sky_eye_dir'], camera=camera)
             print('Starting aicoo data and camera transmission. Keep this terminal open. Press Ctrl+C to stop.', flush=True)
             bridge.run(args.once, settings['preview_port'], not args.no_camera)
     except KeyboardInterrupt:
