@@ -1,0 +1,10 @@
+.git
+.m2
+.tools
+.env*
+target
+data
+*.log
+*.zip
+docs
+clients
