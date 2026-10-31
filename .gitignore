@@ -14,3 +14,9 @@ __pycache__/
 identity.pem
 credential.json
 pending.json
+server.json
+agent.lock
+bridge-cursor.json
+bridge-commands.json
+bridge-errors.json
+bridge-binding.json

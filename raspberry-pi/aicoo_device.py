@@ -30,6 +30,32 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class AgentLock:
+    """Only one process may rotate credentials or publish this device's state."""
+    def __init__(self, state_dir):
+        self.path = Path(state_dir) / 'agent.lock'
+
+    def __enter__(self):
+        self.file = self.path.open('a+b')
+        if self.file.tell() == 0:
+            self.file.write(b'0'); self.file.flush()
+        self.file.seek(0)
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.file.close()
+            raise ValueError('Another aicoo agent is running. Stop it before pairing/status/bridge.') from None
+        return self
+
+    def __exit__(self, *unused):
+        self.file.close()
+
+
 class Agent:
     def __init__(self, api_url, state_dir, allow_http=False):
         parsed = urlparse(api_url)
@@ -210,10 +236,11 @@ def main():
         parser.error("--api-url or AICOO_API_URL is required")
     try:
         agent = Agent(args.api_url, args.state_dir, args.allow_http)
-        if args.command == "run":
-            agent.run(args.once)
-        else:
-            getattr(agent, args.command)()
+        with AgentLock(agent.state_dir):
+            if args.command == "run":
+                agent.run(args.once)
+            else:
+                getattr(agent, args.command)()
     except KeyboardInterrupt:
         print("\nStopped. Device identity is saved; restart the same command to resume.")
     except (ApiError, ValueError, OSError, URLError) as error:
