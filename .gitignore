@@ -9,3 +9,8 @@ data/
 .idea/
 *.iml
 outputs/
+__pycache__/
+*.pyc
+identity.pem
+credential.json
+pending.json

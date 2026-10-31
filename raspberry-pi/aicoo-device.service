@@ -1,0 +1,23 @@
+[Unit]
+Description=aicoo Raspberry Pi connection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace aicoo with the Raspberry Pi login user that ran pair.
+User=aicoo
+EnvironmentFile=/etc/aicoo-device.env
+ExecStart=/usr/bin/python3 /opt/aicoo/raspberry-pi/aicoo_device.py run
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Must match AICOO_STATE_DIR and be owned by User above.
+ReadWritePaths=/var/lib/aicoo
+
+[Install]
+WantedBy=multi-user.target

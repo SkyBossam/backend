@@ -1,0 +1,2 @@
+cryptography>=42,<47
+# Optional QR display: qrcode>=7.4,<9

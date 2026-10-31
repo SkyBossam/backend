@@ -8,8 +8,8 @@ $archivePath = Join-Path $output 'aicoo-backend-source.zip'
 $archive = [IO.Compression.ZipArchive]::new([IO.File]::Open($archivePath, [IO.FileMode]::Create), [IO.Compression.ZipArchiveMode]::Create)
 try {
     $selectedFiles = @()
-    foreach ($folder in @('src', 'docs', 'clients', 'scripts', '.mvn', '.github')) {
-        $selectedFiles += Get-ChildItem -LiteralPath (Join-Path $projectRoot $folder) -File -Recurse
+    foreach ($folder in @('src', 'docs', 'clients', 'scripts', 'raspberry-pi', '.mvn', '.github')) {
+        $selectedFiles += Get-ChildItem -LiteralPath (Join-Path $projectRoot $folder) -File -Recurse | Where-Object { $_.Extension -ne '.pyc' -and $_.FullName -notmatch '[\\/]__pycache__[\\/]' -and $_.Name -notin @('identity.pem','credential.json','pending.json') }
     }
     foreach ($file in @('pom.xml','mvnw','mvnw.cmd','.gitignore','.gitattributes','.dockerignore','.env.example','Dockerfile','compose.yaml','README.md')) {
         $selectedFiles += Get-Item -LiteralPath (Join-Path $projectRoot $file)
