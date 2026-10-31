@@ -23,6 +23,12 @@ def prepare_install():
         subprocess.run(['systemctl', '--user', 'stop', UNIT], check=True)
     elif state != 'not-found':
         raise ValueError('Cannot configure the aicoo user service: ' + state)
+    return state == 'loaded'
+
+
+def resume_standby():
+    subprocess.run(['systemctl', '--user', 'start', UNIT], check=True)
+    print('The aicoo standby service has restarted.', flush=True)
 
 
 def service_text(launcher, config, no_camera=False, no_start_model=False):

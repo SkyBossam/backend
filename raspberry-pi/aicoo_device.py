@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -116,6 +117,7 @@ class Agent:
             headers["Content-Type"] = "application/json"
             payload = json.dumps(body).encode("utf-8")
         if device:
+            self.require_linked_local_state()
             if not self.credential:
                 raise ValueError("No credential. Pair or authenticate first.")
             headers["X-Device-Token"] = self.credential["accessToken"]
@@ -123,6 +125,7 @@ class Agent:
         return self._send(request)
 
     def send_frame(self, captured_at, jpeg):
+        self.require_linked_local_state()
         if not self.credential:
             raise ValueError("Pair the device before streaming.")
         headers = {"Content-Type": "image/jpeg", "Accept": "application/json",
@@ -140,15 +143,59 @@ class Agent:
                 code = "API_ERROR"
             raise ApiError(error.code, code) from None
 
-    def proof(self, purpose):
+    def proof(self, purpose, device_id=None):
         public = base64.b64encode(self.key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode("ascii")
-        challenge = self.request("/pairing/challenges", {"publicKey": public, "purpose": purpose})
+        body = {"publicKey": public, "purpose": purpose}
+        if purpose == 'unlink':
+            device_id = str(uuid.UUID(device_id))
+            body['deviceId'] = device_id
+        challenge = self.request("/pairing/challenges", body)
         message = f"aicoo-device-v1\n{purpose}\n{challenge['challengeId']}\n{challenge['nonce']}"
+        if purpose == 'unlink': message += '\n' + device_id
         return {"publicKey": public, "challengeId": challenge["challengeId"], "nonce": challenge["nonce"], "signature": base64.b64encode(self.key.sign(message.encode("utf-8"))).decode("ascii")}
+
+    def require_linked_local_state(self):
+        if self.read('unlink-request.json'):
+            raise ValueError('An unlink request is pending. Transmission and pairing are paused until the server confirms it.')
+
+    def queue_unlink(self):
+        self.load_key()  # Never replace or delete the persistent Pi identity.
+        if not self.read('unlink-request.json'):
+            previous = self.credential or self.read('bridge-binding.json') or {}
+            target = previous.get('deviceId')
+            self.write('unlink-request.json', {'deviceId': str(uuid.UUID(target)) if target else None})
+
+    def unlink(self):
+        self.queue_unlink()
+        pending = self.read('unlink-request.json')
+        target = pending['deviceId']
+        if not target:
+            # Handles an approval whose first credential response was lost.
+            try:
+                self.authenticate()
+            except ApiError as error:
+                if error.code != 'DEVICE_NOT_PAIRED': raise
+            else:
+                target = self.credential['deviceId']
+                self.write('unlink-request.json', {'deviceId': target})
+        if target:
+            result = self.request('/device/unlink', self.proof('unlink', target))
+            if result.get('unlinked') is not True or result.get('deviceId') != target:
+                raise ValueError('The server did not confirm this device was unlinked. Transmission remains paused.')
+        # Remove only obsolete session files after the server acknowledges revocation.
+        # Keep identity, model records and bridge binding for the next explicit backup.
+        for name in ('credential.json', 'pending.json'):
+            (self.state_dir / name).unlink(missing_ok=True)
+        self.credential = None
+        self.write('unlinked.json', {'deviceId': target})
+        (self.state_dir / 'unlink-request.json').unlink(missing_ok=True)
+        print('Unlinked from the account. Camera and data transmission are stopped.', flush=True)
+        print('To get a new pairing code: bash ~/backend/raspberry-pi/start-aicoo.sh --fresh-profile --install-service', flush=True)
 
     def save_credential(self, credential):
         self.write("credential.json", credential)
         self.credential = credential
+        (self.state_dir / 'unlinked.json').unlink(missing_ok=True)
 
     def authenticate(self):
         self.save_credential(self.request("/device/authenticate", self.proof("authenticate")))
@@ -158,6 +205,7 @@ class Agent:
         return hashlib.sha256(public.encode("utf-8")).hexdigest()[:12]
 
     def pair(self):
+        self.require_linked_local_state()
         self.load_key(create=True)
         pending = self.read("pending.json")
         if not pending or parse_time(pending["expiresAt"]) <= time.time():
@@ -244,7 +292,7 @@ def parse_time(value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("pair", "status", "run"))
+    parser.add_argument("command", choices=("pair", "status", "run", "unlink"))
     parser.add_argument("--api-url", default=os.environ.get("AICOO_API_URL"))
     parser.add_argument("--state-dir", default=os.environ.get("AICOO_STATE_DIR", "~/.local/share/aicoo"))
     parser.add_argument("--allow-http", action="store_true", help="Allow HTTP on a trusted local development network")

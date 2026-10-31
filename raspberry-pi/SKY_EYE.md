@@ -41,6 +41,17 @@ bash ~/backend/raspberry-pi/start-aicoo.sh --no-camera
 
 ## 연결 해제 후 백업하고 새로 시작
 
+앱 계정을 기억하지 못해도 **등록에 사용한 기기 키가 남아 있는 파이**에서 직접 해제할 수 있습니다. PC 백엔드도 이 해제 API가 포함된 최신 코드로 실행 중이어야 합니다. 다음 명령을 각각 한 줄씩 실행합니다.
+
+```bash
+git -C ~/backend pull --ff-only
+bash ~/backend/raspberry-pi/start-aicoo.sh --unlink
+```
+
+설치된 아이쿠 전송 서비스를 잠시 멈추고, 기기 키 서명으로 서버의 현재 계정 연결·기기 토큰·영상 접근 권한을 해제합니다. `Unlinked from the account`가 나오면 서버 해제가 완료된 것입니다. 장기 키와 모델·기록은 보존하며 설치된 서비스는 다시 대기합니다. PC 서버가 꺼져 있으면 전송부터 차단하고 확인 응답을 기다립니다. 이때 Ctrl+C로 나가더라도 설치된 서비스가 저장된 해제 요청을 이어 처리합니다. 서버에서 확인되기 전에는 해제 완료로 표시하지 않습니다.
+
+새 코드를 받을 때는 아래 `--fresh-profile --install-service` 명령을 사용합니다. 새 코드로 승인하기 전까지 이전 계정에 데이터를 다시 보내지 않습니다. 파이에 전경 전송기를 따로 띄웠다면 먼저 그 창에서 Ctrl+C로 중지하세요.
+
 연결을 해제하고 다시 승인하면 기기 번호가 달라집니다. `Child/device binding changed`는 이전 아이의 학습·감지 기록을 새 연결로 보내지 않기 위한 차단입니다. 기존 기록을 파이에 백업하고 빈 개인화 프로필로 시작하려면 다음 두 명령을 **각각 한 줄씩** 실행합니다.
 
 ```bash
@@ -124,7 +135,7 @@ bash ~/backend/raspberry-pi/start-aicoo.sh --fresh-profile --install-service
 
 - 파이 재부팅: 저장된 설정·키로 모델과 전송을 자동 시작합니다.
 - 서버 또는 네트워크 중단: 대기·재시도하고 복구되면 다시 전송합니다.
-- 앱에서 연결 해제: 이전 계정으로의 전송을 멈추고 새 승인을 기다립니다. 자동으로 다른 계정에 등록하지 않습니다. 다시 연결할 때는 위 `--fresh-profile --install-service` 명령을 사용합니다.
+- 앱 또는 파이의 `--unlink`로 연결 해제: 이전 계정으로의 전송을 멈추고 새 승인을 기다립니다. 자동으로 다른 계정에 등록하지 않습니다. 다시 연결할 때는 위 `--fresh-profile --install-service` 명령을 사용합니다.
 - 백업·초기화 옵션은 서비스에 저장하지 않습니다. 재부팅 때마다 학습 기록을 초기화하지 않습니다.
 
 상태 확인, 로그 확인, 자동 대기 끄기:
@@ -151,6 +162,7 @@ python3 -m unittest discover -s raspberry-pi -p 'test_*.py'
 # PC의 localhost:8080 개발 서버에만 가상 계정과 아이를 생성하는 선택 테스트
 python3 raspberry-pi/smoke_bridge_local.py
 python3 raspberry-pi/smoke_camera_local.py  # 검정 테스트 JPEG, 실제 카메라 영상 사용 안 함
+python3 raspberry-pi/smoke_unlink_local.py  # 가상 기기의 파이 해제 및 새 코드 발급
 ```
 
 API: `POST /api/v1/device/sky-eye/status`, `POST /events`, `GET /commands`, `POST /commands/{id}/receipt` (모두 같은 `/api/v1/device/sky-eye` 접두사). 기기 토큰으로 소유 아이를 결정합니다. 앱은 사용자 JWT + workspace 헤더로 `GET /api/v1/children/{id}/sky-eye`, `POST /api/v1/children/{id}/sky-eye/feedback`을 호출합니다. 전체 상태 조회는 monitor:live, cry:read, detection:read 권한이 모두 필요하며 피드백은 cry:feedback 및 이메일 인증이 필요합니다.

@@ -98,6 +98,10 @@ def wait_for_server(address, once=False):
 
 
 def ensure_paired(agent, fresh=False, unattended=False):
+    if unattended and agent.read('unlinked.json'):
+        # No authentication polling after a confirmed unlink: it wastes the
+        # challenge budget needed for the next interactive pairing command.
+        raise ValueError('Waiting for a new connection. Run start-aicoo.sh --fresh-profile --install-service to display a pairing code')
     if (agent.state_dir / 'identity.pem').exists():
         agent.load_key()
         try:
@@ -108,6 +112,7 @@ def ensure_paired(agent, fresh=False, unattended=False):
             if error.code != 'DEVICE_NOT_PAIRED':
                 raise
             if unattended:
+                agent.write('unlinked.json', {'deviceId': (agent.credential or {}).get('deviceId')})
                 raise ValueError('Device is unlinked. Waiting for a new approved connection; run start-aicoo.sh --fresh-profile --install-service to set it up') from None
             # An unlink/reassignment must not silently transfer a child's old profile.
             if agent.read('bridge-binding.json') and not fresh:
@@ -151,6 +156,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--install-service', action='store_true', help='Finish setup, enable startup after reboot and keep running in the background')
     mode.add_argument('--service', action='store_true', help='Unattended mode used by the installed standby service')
+    mode.add_argument('--unlink', action='store_true', help='Disconnect this Pi from its account and leave the installed service in standby')
     args = parser.parse_args()
     if args.fresh_profile and args.no_start_model:
         parser.error('--fresh-profile must manage the model services; do not combine it with --no-start-model')
@@ -158,18 +164,29 @@ def main():
         parser.error('--once cannot be used with background service mode')
     if args.service and args.fresh_profile:
         parser.error('Profile changes require interactive setup, not --service')
+    if args.unlink and args.fresh_profile:
+        parser.error('Unlink first; use --fresh-profile when approving the next connection')
+    resume_standby = False
     try:
-        if args.install_service:
-            background_service.prepare_install()
         path = Path(args.config).expanduser()
         settings = resolve_settings(args, read_config(path), os.environ)
+        if args.install_service or args.unlink:
+            installed = background_service.prepare_install()
+            resume_standby = args.unlink and installed
         # Fail on a missing model before waiting for approval or binding a new identity.
-        if not args.no_start_model and not (Path(settings['sky_eye_dir']) / 'start-all.sh').is_file():
+        pending_unlink = (Path(settings['state_dir']) / 'unlink-request.json').is_file()
+        if not args.unlink and not pending_unlink and not args.no_start_model and not (Path(settings['sky_eye_dir']) / 'start-all.sh').is_file():
             raise ValueError('Cannot find ~/sky-eye/start-all.sh. Set the model installation folder with --sky-eye-dir.')
-        wait_for_server(settings['api_url'], args.once)
         agent = Agent(settings['api_url'], settings['state_dir'], allow_http=settings['api_url'].startswith('http://'))
         with AgentLock(agent.state_dir):
             save_config(path, settings)
+            if args.unlink:
+                agent.queue_unlink()
+                print('Transmission paused. Waiting for the PC server to confirm unlinking.', flush=True)
+            wait_for_server(settings['api_url'], args.once)
+            if agent.read('unlink-request.json'):
+                agent.unlink()
+                return 0
             ensure_paired(agent, fresh=args.fresh_profile, unattended=args.service)
             camera = fresh_profile(agent, settings['sky_eye_dir']) if args.fresh_profile else None
             bridge = Bridge(agent, settings['sky_eye_dir'])
@@ -191,6 +208,13 @@ def main():
         print('aicoo startup failed: %s' % error, file=sys.stderr)
         print('If another aicoo sender or service is running, stop it first. Do not delete device keys or model profiles.', file=sys.stderr)
         return 1
+    finally:
+        if resume_standby:
+            try:
+                background_service.resume_standby()
+            except subprocess.CalledProcessError:
+                print('Could not restart standby. Run: systemctl --user start aicoo-sky-eye', file=sys.stderr)
+                return 1
     return 0
 
 

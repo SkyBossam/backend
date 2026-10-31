@@ -5,9 +5,11 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 from cryptography.hazmat.primitives import serialization
 from aicoo_device import Agent, ApiError, NoRedirect, parse_time
+from urllib.error import URLError
 
 
 class AgentTest(unittest.TestCase):
@@ -81,6 +83,62 @@ class AgentTest(unittest.TestCase):
         request.assert_called_once_with('/pairing/token', {'deviceCode': 'private-test-value'})
         self.assertEqual(self.agent.credential, credential)
         self.assertFalse((self.agent.state_dir / 'pending.json').exists())
+
+    def test_local_unlink_signature_covers_the_original_device_id(self):
+        self.agent.load_key(create=True); target = str(uuid.uuid4())
+        challenge = {'challengeId': str(uuid.uuid4()), 'nonce': 'fixture'}
+        with patch.object(self.agent, 'request', return_value=challenge) as request:
+            signed = self.agent.proof('unlink', target)
+        self.assertEqual(request.call_args.args[1]['deviceId'], target)
+        key = serialization.load_der_public_key(base64.b64decode(signed['publicKey']))
+        key.verify(base64.b64decode(signed['signature']), ('aicoo-device-v1\nunlink\n%s\nfixture\n%s' % (challenge['challengeId'], target)).encode())
+        with self.assertRaises(Exception):
+            key.verify(base64.b64decode(signed['signature']), ('aicoo-device-v1\nunlink\n%s\nfixture\n%s' % (challenge['challengeId'], uuid.uuid4())).encode())
+
+    def test_unlink_keeps_identity_and_profile_binding_and_removes_only_sessions(self):
+        self.agent.load_key(create=True); key = (self.agent.state_dir / 'identity.pem').read_bytes()
+        target = str(uuid.uuid4()); binding = {'deviceId': target, 'root': '/model'}
+        self.agent.save_credential({'deviceId': target, 'accessToken': 'old-fixture'})
+        self.agent.write('bridge-binding.json', binding); self.agent.write('pending.json', {'fixture': True})
+        with patch.object(self.agent, 'proof', return_value={'signed': 'fixture'}) as proof, patch.object(self.agent, 'request', return_value={'unlinked': True, 'deviceId': target}) as request:
+            self.agent.unlink()
+        proof.assert_called_once_with('unlink', target)
+        request.assert_called_once_with('/device/unlink', {'signed': 'fixture'})
+        self.assertEqual((self.agent.state_dir / 'identity.pem').read_bytes(), key)
+        self.assertEqual(self.agent.read('bridge-binding.json'), binding)
+        for name in ('credential.json', 'pending.json', 'unlink-request.json'): self.assertIsNone(self.agent.read(name))
+
+    def test_network_failure_keeps_unlink_target_and_blocks_data_and_pairing(self):
+        self.agent.load_key(create=True); target = str(uuid.uuid4())
+        self.agent.save_credential({'deviceId': target, 'accessToken': 'fixture'})
+        with patch.object(self.agent, 'proof', side_effect=URLError('offline')):
+            with self.assertRaises(URLError): self.agent.unlink()
+        self.assertEqual(self.agent.read('unlink-request.json')['deviceId'], target)
+        with patch.object(self.agent, '_send') as send:
+            with self.assertRaisesRegex(ValueError, 'pending'): self.agent.request('/device/heartbeat', {}, device=True)
+            with self.assertRaisesRegex(ValueError, 'pending'): self.agent.send_frame('fixture', b'jpeg')
+            with self.assertRaisesRegex(ValueError, 'pending'): self.agent.pair()
+        send.assert_not_called()
+        restarted = Agent(self.agent.api_url, self.agent.state_dir)
+        with patch.object(restarted, 'proof', return_value={}) as proof, patch.object(restarted, 'request', return_value={'unlinked': True, 'deviceId': target}):
+            restarted.unlink()
+        proof.assert_called_once_with('unlink', target)
+
+    def test_unlink_without_saved_credential_recovers_an_unredeemed_approval(self):
+        self.agent.load_key(create=True); target = str(uuid.uuid4())
+        def authenticate(): self.agent.save_credential({'deviceId': target, 'accessToken': 'fixture'})
+        with patch.object(self.agent, 'authenticate', side_effect=authenticate), patch.object(self.agent, 'proof', return_value={}), patch.object(self.agent, 'request', return_value={'unlinked': True, 'deviceId': target}):
+            self.agent.unlink()
+        self.assertIsNone(self.agent.read('unlink-request.json'))
+        with patch.object(self.agent, 'authenticate', side_effect=ApiError(401, 'DEVICE_NOT_PAIRED')), patch.object(self.agent, 'request') as request:
+            self.agent.unlink()
+        request.assert_not_called()
+
+    def test_mismatched_unlink_acknowledgement_does_not_resume_sending(self):
+        self.agent.load_key(create=True); self.agent.save_credential({'deviceId': str(uuid.uuid4()), 'accessToken': 'fixture'})
+        with patch.object(self.agent, 'proof', return_value={}), patch.object(self.agent, 'request', return_value={'unlinked': True, 'deviceId': str(uuid.uuid4())}):
+            with self.assertRaises(ValueError): self.agent.unlink()
+        self.assertIsNotNone(self.agent.read('unlink-request.json'))
 
 
 if __name__ == "__main__":

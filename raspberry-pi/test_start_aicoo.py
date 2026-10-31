@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 from aicoo_device import Agent, AgentLock, ApiError
 from start_aicoo import origin, resolve_settings, save_config, ensure_paired, start_model, main
@@ -46,6 +47,16 @@ class LauncherTests(unittest.TestCase):
         with patch.object(agent, 'authenticate', side_effect=ApiError(401, 'DEVICE_NOT_PAIRED')), patch.object(agent, 'pair') as pair:
             ensure_paired(agent, fresh=True)
         pair.assert_called_once()
+
+    def test_confirmed_unlink_waits_without_repeated_authentication_requests(self):
+        agent = Agent('https://api.example', self.args.state_dir); agent.load_key(create=True)
+        agent.write('unlinked.json', {'deviceId': 'old-device'})
+        with patch.object(agent, 'authenticate') as authenticate, patch.object(agent, 'pair') as pair:
+            for _ in range(3):
+                with self.assertRaisesRegex(ValueError, 'Waiting'): ensure_paired(agent, unattended=True)
+        authenticate.assert_not_called(); pair.assert_not_called()
+        agent.save_credential({'deviceId': 'new-device', 'accessToken': 'fixture'})
+        self.assertIsNone(agent.read('unlinked.json'))
 
     def test_config_is_saved_atomically_without_credentials(self):
         path = self.root / 'config/launcher.json'; settings = {'api_url': 'https://api.example', 'sky_eye_dir': 'model'}
@@ -103,6 +114,38 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         prepare.assert_called_once(); installed.assert_called_once()
         bridge.return_value.run.assert_not_called()
+
+    def test_unlink_does_not_require_model_and_resumes_standby_after_releasing_lock(self):
+        agent = Agent('http://127.0.0.1:8080', self.args.state_dir, allow_http=True)
+        agent.load_key(create=True); agent.save_credential({'deviceId': str(uuid.uuid4()), 'accessToken': 'fixture'})
+        argv = ['start_aicoo.py', '--state-dir', self.args.state_dir, '--sky-eye-dir', self.args.sky_eye_dir,
+                '--config', str(self.root / 'launcher.json'), '--unlink']
+        def resume():
+            with AgentLock(self.args.state_dir): pass
+        with patch('sys.argv', argv), patch('start_aicoo.health'), patch('start_aicoo.background_service.prepare_install', return_value=True), patch('start_aicoo.background_service.resume_standby', side_effect=resume) as standby, patch.object(Agent, 'unlink') as unlink, patch('start_aicoo.ensure_paired') as pair, patch('start_aicoo.start_model') as model:
+            self.assertEqual(main(), 0)
+        unlink.assert_called_once(); standby.assert_called_once(); pair.assert_not_called(); model.assert_not_called()
+
+    def test_background_service_processes_interrupted_unlink_before_pairing_or_model(self):
+        agent = Agent('http://127.0.0.1:8080', self.args.state_dir, allow_http=True)
+        agent.load_key(create=True); agent.write('unlink-request.json', {'deviceId': str(uuid.uuid4())})
+        argv = ['start_aicoo.py', '--state-dir', self.args.state_dir, '--sky-eye-dir', self.args.sky_eye_dir,
+                '--config', str(self.root / 'launcher.json'), '--service']
+        with patch('sys.argv', argv), patch('start_aicoo.health'), patch.object(Agent, 'unlink') as unlink, patch('start_aicoo.ensure_paired') as pair, patch('start_aicoo.start_model') as model:
+            self.assertEqual(main(), 0)
+        unlink.assert_called_once(); pair.assert_not_called(); model.assert_not_called()
+
+    def test_offline_unlink_is_saved_before_waiting_and_survives_cancellation(self):
+        agent = Agent('http://127.0.0.1:8080', self.args.state_dir, allow_http=True)
+        agent.load_key(create=True); agent.save_credential({'deviceId': str(uuid.uuid4()), 'accessToken': 'fixture'})
+        argv = ['start_aicoo.py', '--state-dir', self.args.state_dir, '--sky-eye-dir', self.args.sky_eye_dir,
+                '--config', str(self.root / 'launcher.json'), '--unlink']
+        def wait(*args):
+            self.assertIsNotNone(agent.read('unlink-request.json'))
+            raise KeyboardInterrupt()
+        with patch('sys.argv', argv), patch('start_aicoo.wait_for_server', side_effect=wait), patch('start_aicoo.background_service.prepare_install', return_value=True), patch('start_aicoo.background_service.resume_standby') as standby, patch.object(Agent, 'unlink') as unlink:
+            self.assertEqual(main(), 0)
+        standby.assert_called_once(); unlink.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

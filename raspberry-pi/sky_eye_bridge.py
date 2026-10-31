@@ -144,6 +144,7 @@ class Bridge:
         self.commands = agent.read('bridge-commands.json') or {}
 
     def bind(self):
+        self.agent.require_linked_local_state()
         reset = self.agent.read('profile-reset.json')
         if reset and reset.get('phase') != 'complete':
             raise ValueError('Profile reset is unfinished. Run start-aicoo.sh --fresh-profile to resume before sending data.')
