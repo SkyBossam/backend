@@ -1,0 +1,11 @@
+target/
+.tools/
+.m2/
+.env
+.env.*
+!.env.example
+*.log
+data/
+.idea/
+*.iml
+outputs/
