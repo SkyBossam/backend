@@ -20,7 +20,12 @@ public class EventService {
         @NotBlank @Size(max=128) String sourceEventId,@NotBlank @Pattern(regexp="cry|face_covered|edge_proximity|movement|camera_obstructed|connection_lost") String type,
         @NotBlank @Pattern(regexp="immediate|caution|stable|unknown") String severity,@NotNull Instant startedAt,Instant endedAt,
         @DecimalMin("0") @DecimalMax("1") Double confidence,@Size(max=100) String modelVersion,boolean verifiable) {}
+    public record Attempt(@NotNull UUID actionId,@NotBlank @Pattern(regexp="attempted|not_attempted") String state,@Size(max=1000) String note) {}
+    public record Feedback(@NotNull @Size(max=20) List<@Valid Attempt> attempts,@NotBlank @Pattern(regexp="stopped|reduced|continues|unknown") String response,@Size(max=1000) String note) {}
     public record Resolution(@NotBlank @Pattern(regexp="checked_safe|intervention_done|false_alarm|needs_help") String result,@Size(max=1000) String note) {}
+    public record Cause(@NotBlank @Pattern(regexp="hunger|sleepiness|discomfort|illness_check|other") String key,@NotBlank @Size(max=80) String label,@NotBlank @Size(max=500) String reason) {}
+    public record Action(@NotBlank @Pattern(regexp="[a-z_]{1,60}") String key,@NotBlank @Size(max=100) String title,@NotBlank @Size(max=500) String explanation,@NotEmpty @Size(max=8) List<@NotBlank @Size(max=300) String> instructions) {}
+    public record Analysis(@NotBlank @Pattern(regexp="ready|failed|insufficient_data") String status,@NotBlank @Size(max=100) String modelVersion,@NotNull @Size(max=5) List<@Valid Cause> causes,@NotNull @Size(max=10) List<@Valid Action> actions) {}
     private final Db db; private final Policy policy; private final Audit audit; private final Idempotency idem; private final Cursors cursors; private final Outbox outbox;
     private final double threshold;
     public EventService(Db db,Policy policy,Audit audit,Idempotency idem,Cursors cursors,Outbox outbox,@Value("${app.confidence-threshold:0.6}")double threshold) {
@@ -90,6 +95,41 @@ public class EventService {
         result.put("resolutions",db.list("SELECT id,result,note,resolved_at FROM event_resolutions WHERE event_id=:e AND workspace_id=:ws ORDER BY resolved_at,id",p("e",event,"ws",actor.workspaceId())).stream().map(r->view(r,"id","result","note","resolved_at")).toList());
         result.put("feedback",db.list("SELECT id,response,note,created_at FROM care_feedback WHERE event_id=:e AND membership_id=:m",p("e",event,"m",actor.membershipId())).stream().map(r->view(r,"id","response","note","created_at")).toList());
         audit.record(actor.workspaceId(),actor.userId(),"event.read","event",event);return result;
+    }
+    public Object recommendations(Actor actor,UUID event) {
+        var row=policy.event(actor,event,"cry:read");if(!"cry".equals(row.get("type")))throw ApiException.invalid("CRY_EVENT_REQUIRED");
+        var actions=db.list("SELECT * FROM recommendations WHERE event_id=:id ORDER BY priority,id",p("id",event)).stream().map(r->view(r,"id","action_key","title","explanation","instructions","priority","model_version")).toList();
+        var causes=db.list("SELECT * FROM cause_candidates WHERE event_id=:id ORDER BY rank,id",p("id",event)).stream().map(r->view(r,"id","cause_key","label","rank","reason")).toList();
+        audit.record(actor.workspaceId(),actor.userId(),"recommendation.read","event",event);
+        return p("eventId",event,"status",row.get("recommendation_status"),"causes",causes,"actions",actions,"fallbackGuide",List.of("아이의 호흡, 얼굴 가림, 자세를 직접 확인해 주세요.","주변 자극과 기저귀 상태를 확인하고 부드럽게 달래 주세요.","호흡 곤란이나 반응 저하가 보이면 즉시 응급 도움을 요청하세요."),"notice","원인 후보와 행동 안내는 진단이 아니며 아이의 상태를 직접 확인해야 해요.");
+    }
+    /** Trusted model adapter callback. Published recommendations are immutable snapshots. */
+    @Transactional public Object analyze(UUID event,Analysis body) {
+        var row=db.required("SELECT * FROM detection_events WHERE id=:id FOR UPDATE",p("id",event),"EVENT_NOT_FOUND");
+        if(!"cry".equals(row.get("type")))throw ApiException.invalid("CRY_EVENT_REQUIRED");
+        if("ready".equals(row.get("recommendation_status")))throw ApiException.conflict("ANALYSIS_ALREADY_PUBLISHED");
+        if(body.status().equals("ready")&&body.actions().isEmpty())throw ApiException.invalid("ACTIONS_REQUIRED");
+        if(new HashSet<>(body.actions().stream().map(Action::key).toList()).size()!=body.actions().size())throw ApiException.invalid("DUPLICATE_ACTION");
+        if(!body.status().equals("ready")&&(!body.actions().isEmpty()||!body.causes().isEmpty()))throw ApiException.invalid("ANALYSIS_STATUS_MISMATCH");
+        int rank=0;for(var cause:body.causes())db.update("INSERT INTO cause_candidates(id,event_id,cause_key,label,rank,reason) VALUES(:id,:e,:key,:label,:rank,:reason)",p("id",UUID.randomUUID(),"e",event,"key",cause.key(),"label",cause.label(),"rank",++rank,"reason",cause.reason()));
+        rank=0;for(var action:body.actions())db.update("INSERT INTO recommendations(id,event_id,action_key,title,explanation,instructions,priority,model_version) VALUES(:id,:e,:key,:title,:explanation,cast(:instructions as jsonb),:priority,:model)",p("id",UUID.randomUUID(),"e",event,"key",action.key(),"title",action.title(),"explanation",action.explanation(),"instructions",db.json(action.instructions()),"priority",++rank,"model",body.modelVersion()));
+        db.update("UPDATE detection_events SET recommendation_status=:status WHERE id=:id",p("id",event,"status",body.status()));return p("eventId",event,"status",body.status());
+    }
+    @Transactional public Object feedback(Actor actor,UUID event,Feedback body,String key) {
+        var row=policy.event(actor,event,"cry:feedback");if(!"cry".equals(row.get("type")))throw ApiException.invalid("CRY_EVENT_REQUIRED");
+        return idem.execute(actor.membershipId(),key,"feedback:"+event,body,()->{
+            db.required("SELECT id FROM detection_events WHERE id=:id FOR UPDATE",p("id",event),"EVENT_NOT_FOUND");
+            if(db.one("SELECT id FROM care_feedback WHERE event_id=:e AND membership_id=:m",p("e",event,"m",actor.membershipId())).isPresent())throw ApiException.conflict("FEEDBACK_ALREADY_RECORDED");
+            var ids=new HashSet<UUID>();for(var attempt:body.attempts()){
+                if(!ids.add(attempt.actionId()))throw ApiException.invalid("DUPLICATE_ACTION");
+                db.required("SELECT id FROM recommendations WHERE id=:id AND event_id=:e",p("id",attempt.actionId(),"e",event),"ACTION_NOT_IN_EVENT");
+            }
+            UUID feedback=UUID.randomUUID();
+            db.update("INSERT INTO care_feedback(id,event_id,membership_id,workspace_id,response,note,idempotency_key) VALUES(:id,:e,:m,:ws,:response,:note,:key)",p("id",feedback,"e",event,"m",actor.membershipId(),"ws",actor.workspaceId(),"response",body.response(),"note",body.note(),"key",key));
+            for(var attempt:body.attempts())db.update("INSERT INTO action_attempts(id,feedback_id,event_id,recommendation_id,action_state,note) VALUES(:id,:f,:e,:r,:state,:note)",p("id",UUID.randomUUID(),"f",feedback,"e",event,"r",attempt.actionId(),"state",attempt.state(),"note",attempt.note()));
+            audit.record(actor.workspaceId(),actor.userId(),"feedback.create","event",event);
+            return p("id",feedback,"eventId",event,"response",body.response(),"attempts",body.attempts(),"saved",true);
+        });
     }
     @Transactional public Object acknowledge(Actor actor,UUID event) {
         policy.event(actor,event,"detection:ack");

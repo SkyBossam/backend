@@ -17,5 +17,6 @@ public class WorkerController {
     @PostMapping("/devices/{id}/heartbeat") Object heartbeat(@PathVariable UUID id,@RequestBody @Valid MonitoringService.Heartbeat body){return monitoring.heartbeat(id,body);}
     @PostMapping("/devices/{id}/readings") Object reading(@PathVariable UUID id,@RequestBody @Valid MonitoringService.Sensor body){return monitoring.sensor(id,body);}
     @PostMapping("/detections") Object detection(@RequestBody @Valid EventService.Detection body){return events.ingest(body);}
+    @PostMapping("/events/{id}/analysis") Object analysis(@PathVariable UUID id,@RequestBody @Valid EventService.Analysis body){return events.analyze(id,body);}
     @PostMapping("/stream-tokens/introspect") Object introspect(@RequestBody @Valid Token body){return monitoring.introspect(body.token());}
 }
