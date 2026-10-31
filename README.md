@@ -17,9 +17,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-local.ps1
 
 이 작업 폴더에 준비된 `.tools` Java/Maven을 자동 사용합니다. 소스 ZIP을 다른 PC에 풀었다면 Java 21을 설치하고 `JAVA_HOME`을 지정하세요. Maven은 Wrapper가 내려받습니다. 최초 실행에는 인터넷이 필요합니다.
 
-로컬 실행기는 **실제 PostgreSQL 16**을 자동 시작합니다. 데이터는 `data/postgres`, 로컬 비밀 키는 `data/local-secrets.json`에 보관되고 Git/소스 ZIP에서 제외됩니다. Windows의 한글 설치 경로 문제를 피하려고 PostgreSQL 실행 파일만 `%TEMP%/aicoo-postgres-binaries`에 풉니다. API와 DB 모두 로컬 인터페이스에 바인딩합니다. 이 개발용 DB는 trust 인증을 사용하므로 공용 서버에 배포하지 마세요.
+로컬 실행기는 **실제 PostgreSQL 16**을 자동 시작합니다. 데이터는 `data/postgres`, 로컬 비밀 키는 `data/local-secrets.json`에 보관되고 Git/소스 ZIP에서 제외됩니다. Windows의 한글 설치 경로 문제를 피하려고 PostgreSQL 실행 파일만 `%TEMP%/aicoo-postgres-binaries`에 풉니다. 기본 실행에서는 API와 DB 모두 로컬 인터페이스에 바인딩합니다. 이 개발용 DB는 trust 인증을 사용하므로 공용 서버에 배포하지 마세요.
 
 포트 변경: `scripts/start-local.ps1 -Port 8081`. 초기에는 사용자가 없는 빈 데이터베이스입니다. 가입 API로 계정과 개인 공간을 생성합니다. 로컬 모드의 이메일 확인 코드는 가입 응답 `verificationToken`에만 반환됩니다.
+
+같은 네트워크의 Raspberry Pi에서 접근하려면 기존 서버를 종료한 후 `scripts/start-local.ps1 -Lan`으로 실행합니다. 기본 실행은 PC 내부 접속만 허용하며, `-Lan`을 명시하면 API가 `0.0.0.0`에 바인딩되어 PC의 LAN 주소로도 접속할 수 있습니다. PostgreSQL은 계속 로컬 인터페이스에서만 실행됩니다. 프론트는 PC에서 `http://127.0.0.1:5173`으로 열고 코드를 승인할 수 있습니다. [로컬 파이 연결 순서](raspberry-pi/README.md#pc와-파이를-같은-네트워크에서-연결하기)를 참고하세요.
 
 ## 구현 범위
 

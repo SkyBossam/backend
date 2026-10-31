@@ -11,7 +11,8 @@ public class LocalServer {
         var postgres=LocalPostgres.builder().setDataDirectory(data).setCleanDataDirectory(false).start();
         System.setProperty("spring.datasource.url",postgres.getJdbcUrl("postgres","postgres"));
         System.setProperty("spring.datasource.username","postgres");System.setProperty("spring.datasource.password","");
-        System.setProperty("server.address","127.0.0.1");System.setProperty("app.environment","development");System.setProperty("app.mail-mode","local");
+        String address=Boolean.parseBoolean(System.getenv("AICOO_LOCAL_LAN"))?"0.0.0.0":"127.0.0.1";
+        System.setProperty("server.address",address);System.setProperty("app.environment","development");System.setProperty("app.mail-mode","local");
         var app=new SpringApplication(AicooApplication.class);app.setDefaultProperties(Map.of("server.port",8080));app.run(args);
     }
 }
