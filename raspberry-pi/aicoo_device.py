@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -231,7 +232,14 @@ class Agent:
 
 
 def parse_time(value):
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    # Java Instant includes up to nine fractional digits. Python 3.9's
+    # fromisoformat only accepts three or six; normalize to microseconds first.
+    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})', value)
+    if not match:
+        raise ValueError('Invalid server timestamp (an ISO date with a timezone is required).')
+    base, fraction, zone = match.groups()
+    normalized = base + '.' + (fraction or '').ljust(6, '0')[:6] + ('+00:00' if zone == 'Z' else zone)
+    return datetime.strptime(normalized, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
 
 
 def main():
