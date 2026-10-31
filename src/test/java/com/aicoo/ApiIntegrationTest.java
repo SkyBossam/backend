@@ -251,8 +251,11 @@ class ApiIntegrationTest {
 
     private record Pi(KeyPair keys,JsonNode session){}
     private Map<String,Object> proof(KeyPair keys,String purpose)throws Exception{
-        String publicKey=Base64.getEncoder().encodeToString(keys.getPublic().getEncoded());var challenge=call("POST","/pairing/challenges",null,p("publicKey",publicKey,"purpose",purpose),200);
-        var signer=Signature.getInstance("Ed25519");signer.initSign(keys.getPrivate());signer.update(PairingService.proofMessage(purpose,uuid(challenge,"challengeId"),challenge.path("nonce").asText()).getBytes(StandardCharsets.UTF_8));
+        return proof(keys,purpose,null);
+    }
+    private Map<String,Object> proof(KeyPair keys,String purpose,UUID target)throws Exception{
+        String publicKey=Base64.getEncoder().encodeToString(keys.getPublic().getEncoded());var challenge=call("POST","/pairing/challenges",null,p("publicKey",publicKey,"purpose",purpose,"deviceId",target),200);
+        var signer=Signature.getInstance("Ed25519");signer.initSign(keys.getPrivate());signer.update(PairingService.proofMessage(purpose,uuid(challenge,"challengeId"),challenge.path("nonce").asText(),target).getBytes(StandardCharsets.UTF_8));
         return p("publicKey",publicKey,"challengeId",uuid(challenge,"challengeId"),"nonce",challenge.path("nonce").asText(),"signature",Base64.getEncoder().encodeToString(signer.sign()));
     }
     private Pi pi()throws Exception{var keys=KeyPairGenerator.getInstance("Ed25519").generateKeyPair();return new Pi(keys,call("POST","/pairing/start",null,proof(keys,"pair"),200));}
@@ -308,6 +311,37 @@ class ApiIntegrationTest {
         call("POST","/device/authenticate",null,proof(pi.keys(),"authenticate"),401);
         var newOwner=user();UUID newChild=uuid(child(newOwner),"id");var next=new Pi(pi.keys(),call("POST","/pairing/start",null,proof(pi.keys(),"pair"),200));approve(newOwner,newChild,next,"reassign",200);
         var newCredential=poll(next,200);assertThat(newCredential.path("deviceId")).isNotEqualTo(credential.path("deviceId"));assertThat(newCredential.path("childId").asText()).isEqualTo(newChild.toString());deviceCall("/me",token,null,401);
+    }
+    @Test void localUnlinkRevokesAccessKeepsHistoryAndAllowsNewCodeWithoutAccountLogin()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();UUID device=uuid(approve(owner,child,pi,"pair",200),"deviceId");String token=poll(pi,200).path("accessToken").asText();
+        deviceCall("/heartbeat",token,p("status","live","observedAt",Instant.now(),"analysisObservedAt",Instant.now(),"confidence",0.9,"safety",p("face","stable","posture","stable","edge","stable","objects","stable")),200);
+        var stream=call("POST","/children/"+child+"/stream-token",owner,Map.of(),200);
+        var event=detection(owner,child,device,"cry","caution",Instant.now().minusSeconds(30));
+        var signed=proof(pi.keys(),"unlink",device);
+        assertThat(call("POST","/device/unlink",null,signed,200).path("unlinked").asBoolean()).isTrue();
+        call("POST","/device/unlink",null,signed,401);
+        deviceCall("/me",token,null,401);worker("/stream-tokens/introspect",p("token",stream.path("token").asText()),403);
+        assertThat(db.required("SELECT id FROM detection_events WHERE id=:id",p("id",uuid(event,"id")),"missing")).isNotEmpty();
+        assertThat(db.list("SELECT id FROM monitoring_sessions WHERE source_id=:id AND ended_at IS NULL",p("id",device))).isEmpty();
+        assertThat(db.list("SELECT id FROM audit_logs WHERE action='device.unlink.local' AND object_id=:id AND actor_user_id IS NULL",p("id",device))).hasSize(1);
+        assertThat(call("POST","/device/unlink",null,proof(pi.keys(),"unlink",device),200).path("alreadyUnlinked").asBoolean()).isTrue();
+        assertThat(call("POST","/pairing/start",null,proof(pi.keys(),"pair"),200).path("userCode").asText()).isNotBlank();
+    }
+    @Test void localUnlinkRequiresTheMatchingIdentityAndATargetBoundProof()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();UUID device=uuid(approve(owner,child,pi,"pair",200),"deviceId");String token=poll(pi,200).path("accessToken").asText();
+        call("POST","/device/unlink",null,Map.of(),422);deviceCall("/unlink",token,Map.of(),422);
+        call("POST","/device/unlink",null,proof(pi.keys(),"authenticate"),401);
+        var other=KeyPairGenerator.getInstance("Ed25519").generateKeyPair();call("POST","/device/unlink",null,proof(other,"unlink",device),404);
+        var forged=proof(pi.keys(),"unlink",device);forged.put("signature",Base64.getEncoder().encodeToString(new byte[64]));call("POST","/device/unlink",null,forged,401);
+        var signed=proof(pi.keys(),"unlink",device);db.update("UPDATE device_challenges SET target_device_id=:other WHERE id=:id",p("other",UUID.randomUUID(),"id",signed.get("challengeId")));call("POST","/device/unlink",null,signed,401);
+        var expired=proof(pi.keys(),"unlink",device);db.update("UPDATE device_challenges SET expires_at=now()-interval '1 second' WHERE id=:id",p("id",expired.get("challengeId")));call("POST","/device/unlink",null,expired,401);
+        deviceCall("/me",token,null,200);
+    }
+    @Test void delayedLocalUnlinkCannotRevokeANewerApproval()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();UUID old=uuid(approve(owner,child,pi,"pair",200),"deviceId");
+        var delayed=proof(pi.keys(),"unlink",old);call("DELETE","/devices/"+old,owner,null,200);
+        var next=new Pi(pi.keys(),call("POST","/pairing/start",null,proof(pi.keys(),"pair"),200));approve(owner,child,next,"new-pair",200);String token=poll(next,200).path("accessToken").asText();
+        assertThat(call("POST","/device/unlink",null,delayed,409).path("error").path("code").asText()).isEqualTo("DEVICE_BINDING_CHANGED");deviceCall("/me",token,null,200);
     }
     @Test void deviceCannotSelectAnotherWorkspaceOrChildWhenSubmittingDetection()throws Exception{
         var owner=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"pair",200);String token=poll(pi,200).path("accessToken").asText();

@@ -17,7 +17,7 @@ import static com.aicoo.common.Db.*;
 
 @Service
 public class PairingService {
-    public record Challenge(@NotBlank @Size(max=128)String publicKey,@NotBlank @Pattern(regexp="pair|authenticate")String purpose){}
+    public record Challenge(@NotBlank @Size(max=128)String publicKey,@NotBlank @Pattern(regexp="pair|authenticate|unlink")String purpose,UUID deviceId){}
     public record Proof(@NotBlank @Size(max=128)String publicKey,@NotNull UUID challengeId,@NotBlank @Size(max=128)String nonce,@NotBlank @Size(max=128)String signature){}
     public record Code(@NotBlank @Size(max=24)String code){}
     public record Approval(@NotBlank @Size(max=24)String code,@NotNull UUID childId,@NotBlank @Size(max=80)String name){}
@@ -32,17 +32,21 @@ public class PairingService {
         catch(Exception ex){throw ApiException.invalid("INVALID_DEVICE_KEY");}
     }
     public static String proofMessage(String purpose,UUID challenge,String nonce){return "aicoo-device-v1\n"+purpose+"\n"+challenge+"\n"+nonce;}
+    public static String proofMessage(String purpose,UUID challenge,String nonce,UUID target){return proofMessage(purpose,challenge,nonce)+(target==null?"":"\n"+target);}
     @Transactional public Object challenge(Challenge body){
+        if("unlink".equals(body.purpose())!=(body.deviceId()!=null))throw ApiException.invalid("INVALID_CHALLENGE_TARGET");
         key(body.publicKey());UUID id=UUID.randomUUID();String nonce=Secrets.random();Instant expires=Instant.now().plusSeconds(60);
-        db.update("INSERT INTO device_challenges(id,public_key_hash,purpose,nonce_hash,expires_at) VALUES(:id,:key,:purpose,:nonce,:expires)",p("id",id,"key",Secrets.hash(body.publicKey()),"purpose",body.purpose(),"nonce",Secrets.hash(nonce),"expires",expires));
-        return p("challengeId",id,"nonce",nonce,"expiresAt",expires,"algorithm","Ed25519","message",proofMessage(body.purpose(),id,nonce));
+        db.update("INSERT INTO device_challenges(id,public_key_hash,purpose,nonce_hash,expires_at,target_device_id) VALUES(:id,:key,:purpose,:nonce,:expires,:target)",p("id",id,"key",Secrets.hash(body.publicKey()),"purpose",body.purpose(),"nonce",Secrets.hash(nonce),"expires",expires,"target",body.deviceId()));
+        return p("challengeId",id,"nonce",nonce,"expiresAt",expires,"algorithm","Ed25519","message",proofMessage(body.purpose(),id,nonce,body.deviceId()));
     }
-    private void prove(Proof body,String purpose){
+    private UUID prove(Proof body,String purpose){
         var publicKey=key(body.publicKey());var challenge=db.one("SELECT * FROM device_challenges WHERE id=:id FOR UPDATE",p("id",body.challengeId())).orElseThrow(()->ApiException.unauthorized());
         if(challenge.get("used_at")!=null||!instant(challenge,"expires_at").isAfter(Instant.now())||!purpose.equals(challenge.get("purpose"))||!Secrets.equal(Secrets.hash(body.publicKey()),text(challenge,"public_key_hash"))||!Secrets.equal(Secrets.hash(body.nonce()),text(challenge,"nonce_hash")))throw ApiException.unauthorized();
-        try{var verifier=Signature.getInstance("Ed25519");verifier.initVerify(publicKey);verifier.update(proofMessage(purpose,body.challengeId(),body.nonce()).getBytes(StandardCharsets.UTF_8));if(!verifier.verify(Base64.getDecoder().decode(body.signature())))throw ApiException.unauthorized();}
+        UUID target=challenge.get("target_device_id")==null?null:id(challenge,"target_device_id");
+        try{var verifier=Signature.getInstance("Ed25519");verifier.initVerify(publicKey);verifier.update(proofMessage(purpose,body.challengeId(),body.nonce(),target).getBytes(StandardCharsets.UTF_8));if(!verifier.verify(Base64.getDecoder().decode(body.signature())))throw ApiException.unauthorized();}
         catch(ApiException ex){throw ex;}catch(Exception ex){throw ApiException.unauthorized();}
         db.update("UPDATE device_challenges SET used_at=now() WHERE id=:id",p("id",body.challengeId()));
+        return target;
     }
     private Map<String,Object> identity(String publicKey){
         String hash=Secrets.hash(publicKey);db.list("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))",p("key","device-identity:"+hash));
@@ -112,8 +116,22 @@ public class PairingService {
         var found=db.required("SELECT * FROM devices WHERE id=:id AND workspace_id=:ws",p("id",id,"ws",actor.workspaceId()),"DEVICE_NOT_ACCESSIBLE");policy.require(actor,id(found,"child_id"),"child:manage");policy.verified(actor);
         if(found.get("identity_id")==null)throw ApiException.invalid("DEVICE_NOT_PAIRABLE");
         db.required("SELECT id FROM device_identities WHERE id=:id FOR UPDATE",p("id",found.get("identity_id")),"DEVICE_NOT_FOUND");db.required("SELECT id FROM devices WHERE id=:id FOR UPDATE",p("id",id),"DEVICE_NOT_FOUND");
+        revoke(found);
+        audit.record(actor.workspaceId(),actor.userId(),"device.unlink","device",id);return p("unlinked",true,"deviceId",id);
+    }
+    @Transactional public Object unlinkFromDevice(Proof body){
+        UUID target=prove(body,"unlink");var identity=identity(body.publicKey());
+        // An old request must never disconnect a later approval of the same Pi.
+        if(identity.get("active_device_id")!=null&&!target.equals(identity.get("active_device_id")))throw ApiException.conflict("DEVICE_BINDING_CHANGED");
+        var device=db.required("SELECT * FROM devices WHERE id=:id AND identity_id=:identity FOR UPDATE",p("id",target,"identity",identity.get("id")),"DEVICE_NOT_ACCESSIBLE");
+        boolean alreadyUnlinked=device.get("revoked_at")!=null;
+        revoke(device);
+        if(!alreadyUnlinked)audit.record(id(device,"workspace_id"),null,"device.unlink.local","device",target);
+        return p("unlinked",true,"deviceId",target,"alreadyUnlinked",alreadyUnlinked);
+    }
+    private void revoke(Map<String,Object> found){
+        UUID id=id(found,"id");
         db.update("UPDATE devices SET revoked_at=COALESCE(revoked_at,now()),state='offline' WHERE id=:id",p("id",id));db.update("UPDATE device_identities SET active_device_id=NULL WHERE id=:identity AND active_device_id=:device",p("identity",found.get("identity_id"),"device",id));
         db.update("UPDATE device_credentials SET revoked_at=COALESCE(revoked_at,now()) WHERE device_id=:id",p("id",id));db.update("UPDATE device_pairings SET status='cancelled' WHERE device_id=:id",p("id",id));db.update("UPDATE stream_access_tokens SET revoked_at=now() WHERE device_id=:id AND revoked_at IS NULL",p("id",id));db.update("UPDATE monitoring_sessions SET ended_at=last_updated_at WHERE source_id=:id AND ended_at IS NULL",p("id",id));
-        audit.record(actor.workspaceId(),actor.userId(),"device.unlink","device",id);return p("unlinked",true,"deviceId",id);
     }
 }
