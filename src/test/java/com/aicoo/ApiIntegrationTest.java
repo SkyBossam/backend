@@ -376,6 +376,41 @@ class ApiIntegrationTest {
         assertThat(call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items")).isEmpty();
     }
 
+    @Test void approvedPiWithoutSenderIsShownAsWaitingInsteadOfMissing()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"waiting",200);poll(pi,200);
+        var item=call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0);
+        assertThat(item.path("reportState").asText()).isEqualTo("awaiting_sender");assertThat(item.path("lastReportAt").isNull()).isTrue();assertThat(item.path("camera").path("available").asBoolean()).isFalse();
+    }
+    private byte[] jpeg()throws Exception{
+        var image=new java.awt.image.BufferedImage(8,8,java.awt.image.BufferedImage.TYPE_INT_RGB);
+        var out=new java.io.ByteArrayOutputStream();javax.imageio.ImageIO.write(image,"JPEG",out);return out.toByteArray();
+    }
+    private MockHttpServletRequestBuilder uploadFrame(String token,Instant at,byte[] bytes){return post("/api/v1/device/camera/frame").header("X-Device-Token",token).header("X-Frame-Captured-At",at.toString()).contentType("image/jpeg").content(bytes);}
+    @Test void cameraFramesRequireChildAccessAndUnlinkImmediatelyRevokesReads()throws Exception{
+        var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"camera",200);var credentials=poll(pi,200);String token=credentials.path("accessToken").asText(),device=credentials.path("deviceId").asText();
+        var bytes=jpeg();response(uploadFrame(token,Instant.now(),bytes),200);
+        String path="/api/v1/children/"+child+"/devices/"+device+"/camera/frame";
+        var frame=mvc.perform(get(path).header("Authorization","Bearer "+owner.token()).header("X-Workspace-Id",owner.workspace())).andReturn().getResponse();
+        assertThat(frame.getStatus()).isEqualTo(200);assertThat(frame.getContentAsByteArray()).isEqualTo(bytes);assertThat(frame.getContentType()).isEqualTo("image/jpeg");assertThat(frame.getHeader("Cache-Control")).contains("no-store");
+        response(get(path),401);response(get(path).header("Authorization","Bearer "+outsider.token()).header("X-Workspace-Id",outsider.workspace()),404);
+        call("GET","/children/"+other+"/devices/"+device+"/camera/frame",owner,null,404);
+        assertThat(call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("camera").path("available").asBoolean()).isTrue();
+        call("DELETE","/devices/"+device,owner,null,200);response(uploadFrame(token,Instant.now(),bytes),401);call("GET",path.substring(7),owner,null,404);
+    }
+    @Test void cameraRejectsStaleInvalidOversizedFramesAndReturnsNoFrameBeforeUpload()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"camera",200);var c=poll(pi,200);String token=c.path("accessToken").asText(),device=c.path("deviceId").asText();
+        response(get("/api/v1/children/"+child+"/devices/"+device+"/camera/frame").header("Authorization","Bearer "+owner.token()).header("X-Workspace-Id",owner.workspace()),204);
+        response(uploadFrame(token,Instant.now().minusSeconds(20),jpeg()),422);
+        response(uploadFrame(token,Instant.now(),"not a jpeg".getBytes(StandardCharsets.UTF_8)),422);
+        response(uploadFrame(token,Instant.now(),new byte[524289]),413);
+        response(uploadFrame(token,Instant.now(),jpeg()),200);response(uploadFrame(token,Instant.now(),jpeg()),429);
+    }
+    @Test void cameraFramesExpireEvenWhenThePiOrViewerKeepsRunning()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"camera",200);var c=poll(pi,200);String token=c.path("accessToken").asText(),device=c.path("deviceId").asText();
+        response(uploadFrame(token,Instant.now().minusSeconds(4),jpeg()),200);
+        response(get("/api/v1/children/"+child+"/devices/"+device+"/camera/frame").header("Authorization","Bearer "+owner.token()).header("X-Workspace-Id",owner.workspace()),204);
+    }
+
     @Test void invalidPairingAttemptsAreRateLimitedAndPendingPollingSlowsDown()throws Exception{
         var owner=user();for(int i=0;i<10;i++)call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),404);call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),429);
         var pi=pi();poll(pi,200);assertThat(poll(pi,429).path("error").path("code").asText()).isEqualTo("PAIRING_SLOW_DOWN");

@@ -2,6 +2,7 @@ package com.aicoo.device;
 
 import com.aicoo.common.*;
 import com.aicoo.monitoring.MonitoringService;
+import com.aicoo.monitoring.CameraRelay;
 import com.aicoo.security.Policy;
 import com.aicoo.security.Policy.Actor;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -49,9 +50,9 @@ public class SkyEyeService {
         @NotNull @Pattern(regexp="feed|diaper|hold|unknown|self") String action) {}
     public record Receipt(boolean ok) {}
     private final Db db; private final PairingService pairing; private final Policy policy;
-    private final MonitoringService monitoring; private final ObjectMapper mapper;
-    public SkyEyeService(Db db,PairingService pairing,Policy policy,MonitoringService monitoring,ObjectMapper mapper) {
-        this.db=db;this.pairing=pairing;this.policy=policy;this.monitoring=monitoring;this.mapper=mapper;
+    private final MonitoringService monitoring; private final ObjectMapper mapper; private final CameraRelay camera;
+    public SkyEyeService(Db db,PairingService pairing,Policy policy,MonitoringService monitoring,ObjectMapper mapper,CameraRelay camera) {
+        this.db=db;this.pairing=pairing;this.policy=policy;this.monitoring=monitoring;this.mapper=mapper;this.camera=camera;
     }
     private static boolean fresh(Instant at,Instant now,int seconds) {
         return at!=null&&!at.isBefore(now.minusSeconds(seconds))&&!at.isAfter(now.plusSeconds(5));
@@ -108,14 +109,17 @@ public class SkyEyeService {
     }
     public Object snapshot(Actor actor,UUID child) {
         policy.require(actor,child,"monitor:live");policy.require(actor,child,"cry:read");policy.require(actor,child,"detection:read");
-        var devices=db.list("SELECT s.*,d.display_name FROM sky_eye_status s JOIN devices d ON d.id=s.device_id WHERE d.workspace_id=:ws AND d.child_id=:child AND d.revoked_at IS NULL ORDER BY s.received_at DESC LIMIT 10",p("ws",actor.workspaceId(),"child",child));
+        var devices=db.list("SELECT d.id AS device_id,d.display_name,d.last_seen_at,d.created_at,s.body,s.received_at FROM devices d LEFT JOIN sky_eye_status s ON d.id=s.device_id WHERE d.workspace_id=:ws AND d.child_id=:child AND d.revoked_at IS NULL AND d.identity_id IS NOT NULL ORDER BY s.received_at DESC NULLS LAST,d.created_at DESC LIMIT 10",p("ws",actor.workspaceId(),"child",child));
         var items=new ArrayList<Map<String,Object>>();Instant now=Instant.now();
         for(var row:devices) {
-            UUID device=id(row,"device_id");var status=effective(mapper.convertValue(row.get("body"),Status.class),now);
+            UUID device=id(row,"device_id");
+            var status=row.get("body")!=null?effective(mapper.convertValue(row.get("body"),Status.class),now):new Status(instant(row,"created_at"),new Camera(false,null,null,null,"unavailable",null,null,false,"unavailable",null),new Audio(false,null,false,null,null),null);
+            boolean connected=fresh(instant(row,"last_seen_at"),now,15);
+            String reportState=row.get("received_at")==null?(connected?"awaiting_model":"awaiting_sender"):!connected?"offline":!status.video().available()&&!status.audio().available()?"input_unavailable":"receiving";
             var events=db.list("SELECT body,received_at FROM sky_eye_events WHERE device_id=:device ORDER BY observed_at DESC,event_id LIMIT 30",p("device",device));
             var eventViews=events.stream().map(e->{var event=mapper.convertValue(e.get("body"),Event.class);return p("event",event,"recent",fresh(event.observedAt(),now,30)&&fresh(instant(e,"received_at"),now,30));}).toList();
             var commands=db.list("SELECT id,episode_uid,action,CASE WHEN status='queued' AND expires_at<now() THEN 'expired' ELSE status END AS status FROM sky_eye_commands WHERE device_id=:device ORDER BY created_at DESC LIMIT 20",p("device",device)).stream().map(c->view(c,"id","episode_uid","action","status")).toList();
-            items.add(p("deviceId",device,"name",row.get("display_name"),"connected",fresh(instant(row,"received_at"),now,15),"status",status,"safety",safety(status),"events",eventViews,"commands",commands));
+            items.add(p("deviceId",device,"name",row.get("display_name"),"connected",connected,"reportState",reportState,"lastReportAt",row.get("received_at"),"camera",camera.state(device),"status",status,"safety",safety(status),"events",eventViews,"commands",commands));
         }
         return p("childId",child,"items",items,"serverTime",now);
     }
