@@ -56,6 +56,7 @@ springdoc:
     enabled: ${API_DOCS_ENABLED:true}
 app:
   environment: ${APP_ENV:development}
+  frontend-url: ${FRONTEND_URL:http://localhost:5173}
   jwt-secret: ${JWT_SECRET:}
   worker-key: ${WORKER_KEY:}
   issuer: aicoo-api

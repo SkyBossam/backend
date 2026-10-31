@@ -19,6 +19,11 @@ import java.nio.file.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.Signature;
+import java.nio.charset.StandardCharsets;
+import com.aicoo.device.PairingService;
 import static com.aicoo.common.Db.*;
 import static org.assertj.core.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -242,5 +247,83 @@ class ApiIntegrationTest {
         UUID event=uuid(detection(owner,id,camera(owner,id),"face_covered","immediate",Instant.now().minusSeconds(2)),"id");call("POST","/events/"+event+"/acknowledgements",owner,Map.of(),200);
         var detail=call("GET","/events/"+event,target,null,200);assertThat(detail.path("status").asText()).isEqualTo("acknowledged");assertThat(detail.path("acknowledgedAt").isNull()).isTrue();
         call("POST","/events/"+event+"/acknowledgements",target,Map.of(),200);assertThat(db.list("SELECT id FROM event_acknowledgements WHERE event_id=:id",p("id",event))).hasSize(2);
+    }
+
+    private record Pi(KeyPair keys,JsonNode session){}
+    private Map<String,Object> proof(KeyPair keys,String purpose)throws Exception{
+        String publicKey=Base64.getEncoder().encodeToString(keys.getPublic().getEncoded());var challenge=call("POST","/pairing/challenges",null,p("publicKey",publicKey,"purpose",purpose),200);
+        var signer=Signature.getInstance("Ed25519");signer.initSign(keys.getPrivate());signer.update(PairingService.proofMessage(purpose,uuid(challenge,"challengeId"),challenge.path("nonce").asText()).getBytes(StandardCharsets.UTF_8));
+        return p("publicKey",publicKey,"challengeId",uuid(challenge,"challengeId"),"nonce",challenge.path("nonce").asText(),"signature",Base64.getEncoder().encodeToString(signer.sign()));
+    }
+    private Pi pi()throws Exception{var keys=KeyPairGenerator.getInstance("Ed25519").generateKeyPair();return new Pi(keys,call("POST","/pairing/start",null,proof(keys,"pair"),200));}
+    private JsonNode approve(User owner,UUID child,Pi pi,String key,int status)throws Exception{return call("POST","/device-pairings/approve",owner,p("code",pi.session().path("userCode").asText(),"childId",child,"name","지안이 침대 카메라"),key,status);}
+    private JsonNode poll(Pi pi,int status)throws Exception{return call("POST","/pairing/token",null,p("deviceCode",pi.session().path("deviceCode").asText()),status);}
+    private JsonNode deviceCall(String path,String token,Object body,int status)throws Exception{return response((body==null?get("/api/v1/device"+path):post("/api/v1/device"+path)).header("X-Device-Token",token).contentType("application/json").content(body==null?new byte[0]:json.writeValueAsBytes(body)),status);}
+
+    @Test void pairingBindsToChildAndOnlyPiCanRedeemCredential()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();assertThat(pi.session().path("userCode").asText()).matches("[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}");
+        assertThat(poll(pi,200).path("status").asText()).isEqualTo("pending");
+        var inspection=call("POST","/device-pairings/inspect",owner,p("code",pi.session().path("userCode").asText()),200);assertThat(inspection.has("deviceCode")).isFalse();
+        var approved=approve(owner,child,pi,"pair-once",200);assertThat(approved.has("accessToken")).isFalse();assertThat(approve(owner,child,pi,"pair-once",200)).isEqualTo(approved);
+        var credentials=poll(pi,200);assertThat(poll(pi,200)).isEqualTo(credentials);String token=credentials.path("accessToken").asText();
+        assertThat(deviceCall("/me",token,null,200).path("childId").asText()).isEqualTo(child.toString());
+        deviceCall("/heartbeat",token,p("status","unverifiable","observedAt",Instant.now()),200);
+        var devices=call("GET","/children/"+child+"/devices",owner,null,200);assertThat(devices.path("items").get(0).path("connected").asBoolean()).isTrue();assertThat(devices.path("items").get(0).has("tokenHash")).isFalse();
+        call("POST","/pairing/token",null,p("deviceCode",pi.session().path("userCode").asText()),401);call("GET","/children",new User(token,"",owner.workspace(),owner.member(),owner.user(),owner.email()),null,401);
+        assertThat(db.required("SELECT token_hash FROM device_credentials",Map.of(),"missing").get("token_hash")).isEqualTo(Secrets.hash(token));
+    }
+    @Test void deviceProofCannotBeForgedReplayedOrUsedForAnotherPurpose()throws Exception{
+        var keys=KeyPairGenerator.getInstance("Ed25519").generateKeyPair();var signed=proof(keys,"pair");var forged=new LinkedHashMap<>(signed);forged.put("signature",Base64.getEncoder().encodeToString(new byte[64]));call("POST","/pairing/start",null,forged,401);
+        call("POST","/pairing/start",null,signed,200);call("POST","/pairing/start",null,signed,401);
+        call("POST","/pairing/start",null,proof(keys,"authenticate"),401);
+        var expired=proof(keys,"pair");db.update("UPDATE device_challenges SET expires_at=now()-interval '1 second' WHERE id=:id",p("id",expired.get("challengeId")));call("POST","/pairing/start",null,expired,401);
+    }
+    @Test void pairedIdentityCannotCreateAnotherCodeBeforeUnlink()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"pair",200);
+        assertThat(call("POST","/pairing/start",null,proof(pi.keys(),"pair"),409).path("error").path("code").asText()).isEqualTo("DEVICE_ALREADY_PAIRED");
+    }
+    @Test void pairingExpiryAndNewCodeInvalidateOldRequests()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var old=pi();var fresh=new Pi(old.keys(),call("POST","/pairing/start",null,proof(old.keys(),"pair"),200));
+        approve(owner,child,old,"old",409);poll(old,409);
+        db.update("UPDATE device_pairings SET expires_at=now()-interval '1 second' WHERE id=:id",p("id",uuid(fresh.session(),"pairingId")));approve(owner,child,fresh,"expired",409);poll(fresh,409);
+    }
+    @Test void onlyVerifiedChildManagersCanPair()throws Exception{
+        var owner=user();var target=user();var child=child(owner);var pi=pi();var invited=invite(owner,target,child,List.of("child:read"));target=accept(owner,target,invited);
+        approve(target,uuid(child,"id"),pi,"viewer",403);
+        db.update("UPDATE users SET email_verified=false WHERE id=:id",p("id",owner.user()));approve(owner,uuid(child,"id"),pi,"unverified",403);
+        var outsider=user();approve(outsider,uuid(child,"id"),pi,"wrong-workspace",404);
+        assertThat(db.list("SELECT id FROM devices WHERE identity_id IS NOT NULL",Map.of())).isEmpty();
+    }
+    @Test void rebootReauthenticatesSameDeviceAndRotatesToken()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"pair",200);var previous=poll(pi,200);
+        var renewed=call("POST","/device/authenticate",null,proof(pi.keys(),"authenticate"),200);assertThat(renewed.path("deviceId")).isEqualTo(previous.path("deviceId"));assertThat(renewed.path("accessToken")).isNotEqualTo(previous.path("accessToken"));
+        deviceCall("/me",previous.path("accessToken").asText(),null,401);deviceCall("/me",renewed.path("accessToken").asText(),null,200);poll(pi,401);
+    }
+    @Test void unlinkStopsTokensAndStreamsAndAllowsExplicitReassignment()throws Exception{
+        var owner=user();var child=child(owner);UUID id=uuid(child,"id");var pi=pi();var paired=approve(owner,id,pi,"pair",200);var credential=poll(pi,200);String token=credential.path("accessToken").asText();
+        deviceCall("/heartbeat",token,p("status","live","observedAt",Instant.now(),"analysisObservedAt",Instant.now(),"confidence",0.9,"safety",p("face","stable","posture","stable","edge","stable","objects","stable")),200);
+        var stream=call("POST","/children/"+id+"/stream-token",owner,Map.of(),200);
+        call("DELETE","/devices/"+paired.path("deviceId").asText(),owner,null,200);deviceCall("/heartbeat",token,p("status","live","observedAt",Instant.now()),401);
+        worker("/stream-tokens/introspect",p("token",stream.path("token").asText()),403);worker("/devices/"+paired.path("deviceId").asText()+"/heartbeat",p("status","live","observedAt",Instant.now()),404);
+        call("POST","/device/authenticate",null,proof(pi.keys(),"authenticate"),401);
+        var newOwner=user();UUID newChild=uuid(child(newOwner),"id");var next=new Pi(pi.keys(),call("POST","/pairing/start",null,proof(pi.keys(),"pair"),200));approve(newOwner,newChild,next,"reassign",200);
+        var newCredential=poll(next,200);assertThat(newCredential.path("deviceId")).isNotEqualTo(credential.path("deviceId"));assertThat(newCredential.path("childId").asText()).isEqualTo(newChild.toString());deviceCall("/me",token,null,401);
+    }
+    @Test void deviceCannotSelectAnotherWorkspaceOrChildWhenSubmittingDetection()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"pair",200);String token=poll(pi,200).path("accessToken").asText();
+        var event=deviceCall("/detections",token,p("workspaceId",UUID.randomUUID(),"childId",other,"sourceId",UUID.randomUUID(),"sourceEventId","test-scope","type","cry","severity","caution","startedAt",Instant.now(),"confidence",0.9,"verifiable",true),200);
+        assertThat(event.path("childId").asText()).isEqualTo(child.toString());assertThat(event.path("workspaceId").asText()).isEqualTo(owner.workspace().toString());
+        call("POST","/internal/detections",null,Map.of(),401);
+    }
+    @Test void concurrentOwnersCannotClaimOneDeviceTwice()throws Exception{
+        var a=user();var b=user();UUID ac=uuid(child(a),"id"),bc=uuid(child(b),"id");var pi=pi();
+        try(var pool=Executors.newVirtualThreadPerTaskExecutor()){
+            var results=new ArrayList<Future<Integer>>();for(var item:List.of(p("user",a,"child",ac),p("user",b,"child",bc)))results.add(pool.submit(()->{User u=(User)item.get("user");return mvc.perform(post("/api/v1/device-pairings/approve").header("Authorization","Bearer "+u.token()).header("X-Workspace-Id",u.workspace()).header("Idempotency-Key","race").contentType("application/json").content(json.writeValueAsBytes(p("code",pi.session().path("userCode").asText(),"childId",item.get("child"),"name","우리 카메라")))).andReturn().getResponse().getStatus();}));
+            assertThat(List.of(results.get(0).get(10,TimeUnit.SECONDS),results.get(1).get(10,TimeUnit.SECONDS))).containsExactlyInAnyOrder(200,409);
+        }assertThat(db.list("SELECT id FROM devices WHERE identity_id IS NOT NULL",Map.of())).hasSize(1);
+    }
+    @Test void invalidPairingAttemptsAreRateLimitedAndPendingPollingSlowsDown()throws Exception{
+        var owner=user();for(int i=0;i<10;i++)call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),404);call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),429);
+        var pi=pi();poll(pi,200);assertThat(poll(pi,429).path("error").path("code").asText()).isEqualTo("PAIRING_SLOW_DOWN");
     }
 }

@@ -35,7 +35,7 @@ public class EventService {
     @Transactional
     public Map<String,Object> ingest(Detection body) {
         if(body.startedAt().isAfter(Instant.now().plusSeconds(30))||body.endedAt()!=null&&(body.endedAt().isBefore(body.startedAt())||body.endedAt().isAfter(Instant.now().plusSeconds(30)))) throw ApiException.invalid("INVALID_EVENT_TIME");
-        var device=db.required("SELECT d.* FROM devices d JOIN workspace_children wc ON wc.id=d.workspace_child_id JOIN workspaces w ON w.id=d.workspace_id WHERE d.id=:id AND d.workspace_id=:ws AND d.child_id=:child AND wc.link_status='active' AND w.status='active' AND (wc.share_grant_id IS NULL OR EXISTS(SELECT 1 FROM data_share_grants s WHERE s.id=wc.share_grant_id AND s.revoked_at IS NULL AND s.expires_at>now())) FOR UPDATE OF d",p("id",body.sourceId(),"ws",body.workspaceId(),"child",body.childId()),"SOURCE_NOT_ACCESSIBLE");
+        var device=db.required("SELECT d.* FROM devices d JOIN workspace_children wc ON wc.id=d.workspace_child_id JOIN workspaces w ON w.id=d.workspace_id WHERE d.id=:id AND d.revoked_at IS NULL AND d.workspace_id=:ws AND d.child_id=:child AND wc.link_status='active' AND w.status='active' AND (wc.share_grant_id IS NULL OR EXISTS(SELECT 1 FROM data_share_grants s WHERE s.id=wc.share_grant_id AND s.revoked_at IS NULL AND s.expires_at>now())) FOR UPDATE OF d",p("id",body.sourceId(),"ws",body.workspaceId(),"child",body.childId()),"SOURCE_NOT_ACCESSIBLE");
         String hash=Secrets.hash(db.json(body));
         var receipt=db.one("SELECT * FROM detection_receipts WHERE source_id=:s AND source_event_id=:key",p("s",body.sourceId(),"key",body.sourceEventId()));
         if(receipt.isPresent()) {

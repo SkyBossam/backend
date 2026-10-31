@@ -28,7 +28,7 @@ public class MonitoringService {
         return p("id",id,"workspaceId",body.workspaceId(),"childId",body.childId(),"type",body.type());
     }
     private Map<String,Object> device(UUID id) {
-        return db.required("SELECT d.* FROM devices d JOIN workspace_children wc ON wc.id=d.workspace_child_id JOIN workspaces w ON w.id=d.workspace_id WHERE d.id=:id AND wc.link_status='active' AND w.status='active' AND (wc.share_grant_id IS NULL OR EXISTS(SELECT 1 FROM data_share_grants s WHERE s.id=wc.share_grant_id AND s.revoked_at IS NULL AND s.expires_at>now())) FOR UPDATE OF d",p("id",id),"DEVICE_NOT_ACCESSIBLE");
+        return db.required("SELECT d.* FROM devices d JOIN workspace_children wc ON wc.id=d.workspace_child_id JOIN workspaces w ON w.id=d.workspace_id WHERE d.id=:id AND d.revoked_at IS NULL AND wc.link_status='active' AND w.status='active' AND (wc.share_grant_id IS NULL OR EXISTS(SELECT 1 FROM data_share_grants s WHERE s.id=wc.share_grant_id AND s.revoked_at IS NULL AND s.expires_at>now())) FOR UPDATE OF d",p("id",id),"DEVICE_NOT_ACCESSIBLE");
     }
     private void validateTime(Instant at){if(at.isAfter(Instant.now().plusSeconds(30)))throw ApiException.invalid("FUTURE_OBSERVATION");}
     @Transactional public Object heartbeat(UUID id,Heartbeat body) {
@@ -68,7 +68,7 @@ public class MonitoringService {
         if(latest.isPresent()){var row=latest.get();updated=instant(row,"last_updated_at");if(updated.isAfter(Instant.now().minusSeconds(staleSeconds))){status=text(row,"status");if(status.equals("live"))safety=row.get("safety");}}
         var sensors=new ArrayList<Map<String,Object>>();
         for(String type:List.of("temperature","humidity","noise")) {
-            var reading=db.one("SELECT r.* FROM sensor_readings r JOIN devices d ON d.id=r.device_id WHERE d.workspace_id=:ws AND d.child_id=:child AND r.metric=:metric ORDER BY r.observed_at DESC LIMIT 1",p("ws",workspace,"child",child,"metric",type));
+            var reading=db.one("SELECT r.* FROM sensor_readings r JOIN devices d ON d.id=r.device_id WHERE d.workspace_id=:ws AND d.child_id=:child AND d.revoked_at IS NULL AND r.metric=:metric ORDER BY r.observed_at DESC LIMIT 1",p("ws",workspace,"child",child,"metric",type));
             boolean connected=reading.isPresent()&&instant(reading.get(),"observed_at").isAfter(Instant.now().minusSeconds(120));
             sensors.add(p("type",type,"connected",connected,"unit",unit(type),"value",connected?reading.get().get("value"):null,"observedAt",connected?reading.get().get("observed_at"):null));
         }
