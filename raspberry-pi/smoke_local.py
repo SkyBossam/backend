@@ -21,8 +21,7 @@ def request(path, body=None, token=None, workspace=None, method=None):
 
 
 def main():
-    account = request("/auth/signup", {"email": f"pi-smoke-{uuid.uuid4()}@example.test", "password": uuid.uuid4().hex})
-    request("/auth/verify-email", {"token": account["verificationToken"]})
+    account = request("/auth/signup", {"username": f"pi_smoke_{uuid.uuid4().hex[:20]}", "password": uuid.uuid4().hex})
     token, workspace = account["accessToken"], account["workspaceId"]
     child = request("/children", {"displayName": "연결 검증용 아이", "birthDate": "2026-01-01"}, token, workspace)
     # No raw credential is written to stdout or a repository file.

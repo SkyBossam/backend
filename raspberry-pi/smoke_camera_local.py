@@ -20,7 +20,6 @@ JPEG=base64.b64decode('/9j/4AAQSkZJRgABAgAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQND
 
 def main():
     account=request('/auth/signup',{'email':'camera-test-%s@example.test'%uuid.uuid4(),'password':uuid.uuid4().hex})
-    request('/auth/verify-email',{'token':account['verificationToken']})
     token,workspace=account['accessToken'],account['workspaceId']
     child=request('/children',{'displayName':'영상 통신 검증용 아이','birthDate':'2026-01-01'},token,workspace)
     with tempfile.TemporaryDirectory(prefix='aicoo-camera-test-') as folder:

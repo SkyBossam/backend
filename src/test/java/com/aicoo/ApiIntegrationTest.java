@@ -53,8 +53,14 @@ class ApiIntegrationTest {
     private UUID uuid(JsonNode node,String field){return UUID.fromString(node.path(field).asText());}
     private User user()throws Exception{
         String email="test"+(++emails)+"@example.test";var signed=call("POST","/auth/signup",null,p("email",email,"password","correct-password-123"),201);
-        call("POST","/auth/verify-email",null,p("token",signed.path("verificationToken").asText()),200);
+        call("POST","/auth/verify-email",null,p("token",call("POST","/auth/request-verification",null,p("email",signed.path("email").asText()),200).path("verificationToken").asText()),200);
         return new User(signed.path("accessToken").asText(),signed.path("refreshToken").asText(),uuid(signed,"workspaceId"),uuid(signed,"membershipId"),uuid(signed,"userId"),email);
+    }
+    private User usernameUser()throws Exception{
+        var signed=call("POST","/auth/signup",null,p("username","parent"+(++emails),"password","correct-password-123"),201);
+        assertThat(signed.path("email").isNull()).isTrue();assertThat(signed.path("emailVerified").asBoolean()).isFalse();assertThat(signed.has("verificationToken")).isFalse();
+        assertThat(db.list("SELECT id FROM email_verifications WHERE user_id=:id",p("id",uuid(signed,"userId")))).isEmpty();
+        return new User(signed.path("accessToken").asText(),signed.path("refreshToken").asText(),uuid(signed,"workspaceId"),uuid(signed,"membershipId"),uuid(signed,"userId"),null);
     }
     private User workspace(User user,UUID workspace,UUID member){return new User(user.token(),user.refresh(),workspace,member,user.user(),user.email());}
     private JsonNode child(User user)throws Exception{return call("POST","/children",user,p("displayName","지안","birthDate","2026-01-15"),201);}
@@ -77,6 +83,56 @@ class ApiIntegrationTest {
         User user=user();var spaces=call("GET","/me/workspaces",user,null,200);assertThat(spaces.path("items").get(0).path("type").asText()).isEqualTo("PERSONAL");
         var row=db.required("SELECT token_hash FROM user_sessions WHERE user_id=:id",p("id",user.user()),"missing");assertThat(row.get("token_hash")).isEqualTo(Secrets.hash(user.refresh())).isNotEqualTo(user.refresh());
         assertThat(call("GET","/children",user,null,200).path("items")).isEmpty();
+    }
+    @Test void signupWithoutEmailSupportsLoginAndRefreshAndDoesNotSendVerification()throws Exception{
+        var owner=usernameUser();var other=usernameUser();
+        assertThat(other.user()).isNotEqualTo(owner.user());
+        var login=call("POST","/auth/login",null,p("username","PARENT1","password","correct-password-123"),200);
+        assertThat(uuid(login,"userId")).isEqualTo(owner.user());assertThat(login.path("email").isNull()).isTrue();
+        var refreshed=call("POST","/auth/refresh",null,p("refreshToken",login.path("refreshToken").asText()),200);
+        assertThat(refreshed.path("username").asText()).isEqualTo("parent1");assertThat(refreshed.path("emailVerified").asBoolean()).isFalse();
+        call("POST","/auth/signup",null,p("password","correct-password-123"),422);
+        assertThat(db.list("SELECT id FROM email_verifications",Map.of())).isEmpty();
+    }
+    @Test void usernameLoginPreservesAccountChildrenAndOptionalEmail()throws Exception{
+        var signed=call("POST","/auth/signup",null,p("username"," Aicoo.Parent ","email","parent@example.test","password","correct-password-123"),201);
+        assertThat(signed.path("username").asText()).isEqualTo("aicoo.parent");assertThat(signed.path("email").asText()).isEqualTo("parent@example.test");
+        var owner=new User(signed.path("accessToken").asText(),signed.path("refreshToken").asText(),uuid(signed,"workspaceId"),uuid(signed,"membershipId"),uuid(signed,"userId"),"parent@example.test");
+        UUID child=uuid(child(owner),"id");
+        var login=call("POST","/auth/login",null,p("username"," AICOO.PARENT ","password","correct-password-123"),200);
+        assertThat(login.path("userId")).isEqualTo(signed.path("userId"));assertThat(login.path("username").asText()).isEqualTo("aicoo.parent");
+        var same=new User(login.path("accessToken").asText(),login.path("refreshToken").asText(),owner.workspace(),owner.member(),owner.user(),owner.email());
+        assertThat(uuid(call("GET","/children",same,null,200).path("items").get(0),"id")).isEqualTo(child);
+        call("POST","/auth/verify-email",null,p("token",call("POST","/auth/request-verification",null,p("email",signed.path("email").asText()),200).path("verificationToken").asText()),200);
+        var refreshed=call("POST","/auth/refresh",null,p("refreshToken",login.path("refreshToken").asText()),200);
+        assertThat(refreshed.path("username").asText()).isEqualTo("aicoo.parent");assertThat(refreshed.path("emailVerified").asBoolean()).isTrue();
+        assertThat(call("POST","/auth/login",null,p("email",owner.email(),"password","correct-password-123"),200).path("userId")).isEqualTo(signed.path("userId"));
+        assertThat(call("POST","/auth/login",null,p("username",owner.email(),"password","correct-password-123"),200).path("userId")).isEqualTo(signed.path("userId"));
+    }
+    @Test void usernamesAreUniqueAndLoginFailuresDoNotRevealAccountExistence()throws Exception{
+        call("POST","/auth/signup",null,p("username","parent","email","one@example.test","password","correct-password-123"),201);
+        assertThat(call("POST","/auth/signup",null,p("username","PARENT","email","two@example.test","password","correct-password-123"),409).path("error").path("code").asText()).isEqualTo("USERNAME_UNAVAILABLE");
+        for(String name:List.of("", "bad name", "parent@example.test", "_parent", "x".repeat(33)))call("POST","/auth/signup",null,p("username",name,"email","invalid@example.test","password","correct-password-123"),422);
+        for(String name:List.of("parent","missing"))assertThat(call("POST","/auth/login",null,p("username",name,"password","wrong-password"),401).path("error").path("code").asText()).isEqualTo("INVALID_CREDENTIALS");
+        call("POST","/auth/login",null,p("password","correct-password-123"),422);
+        call("POST","/auth/login",null,p("username","parent","email","one@example.test","password","correct-password-123"),422);
+        db.update("UPDATE users SET status='disabled' WHERE username='parent'",Map.of());
+        call("POST","/auth/login",null,p("username","parent","password","correct-password-123"),401);
+    }
+    @Test void legacySignupAssignsDistinctIdsForTheSameEmailPrefix()throws Exception{
+        var first=call("POST","/auth/signup",null,p("email","family@one.test","password","correct-password-123"),201);
+        var second=call("POST","/auth/signup",null,p("email","family@two.test","password","correct-password-123"),201);
+        assertThat(first.path("username").asText()).isEqualTo("family");assertThat(second.path("username").asText()).isEqualTo("family_2");
+        assertThat(call("POST","/auth/login",null,p("username","family_2","password","correct-password-123"),200).path("userId")).isEqualTo(second.path("userId"));
+        assertThat(call("POST","/auth/login",null,p("email","family@one.test","password","correct-password-123"),200).path("userId")).isEqualTo(first.path("userId"));
+    }
+    @Test void concurrentSignupCannotClaimTheSameUsernameTwice()throws Exception{
+        try(var pool=Executors.newVirtualThreadPerTaskExecutor()) {
+            var requests=new ArrayList<Future<Integer>>();
+            for(String email:List.of("race-a@example.test","race-b@example.test"))requests.add(pool.submit(()->mvc.perform(post("/api/v1/auth/signup").contentType("application/json").content(json.writeValueAsBytes(p("username","racing-parent","email",email,"password","correct-password-123")))).andReturn().getResponse().getStatus()));
+            assertThat(List.of(requests.get(0).get(10,TimeUnit.SECONDS),requests.get(1).get(10,TimeUnit.SECONDS))).containsExactlyInAnyOrder(201,409);
+        }
+        assertThat(db.list("SELECT id FROM users WHERE username='racing-parent'",Map.of())).hasSize(1);
     }
     @Test void unauthenticatedAndInternalRequestsFailWithRequestId()throws Exception{
         var failure=call("GET","/children",null,null,401);assertThat(failure.path("error").path("requestId").asText()).matches("[0-9a-f-]{36}");
@@ -264,7 +320,7 @@ class ApiIntegrationTest {
     private JsonNode deviceCall(String path,String token,Object body,int status)throws Exception{return response((body==null?get("/api/v1/device"+path):post("/api/v1/device"+path)).header("X-Device-Token",token).contentType("application/json").content(body==null?new byte[0]:json.writeValueAsBytes(body)),status);}
 
     @Test void pairingBindsToChildAndOnlyPiCanRedeemCredential()throws Exception{
-        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();assertThat(pi.session().path("userCode").asText()).matches("[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}");
+        var owner=usernameUser();UUID child=uuid(child(owner),"id");var pi=pi();assertThat(pi.session().path("userCode").asText()).matches("[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}");
         assertThat(poll(pi,200).path("status").asText()).isEqualTo("pending");
         var inspection=call("POST","/device-pairings/inspect",owner,p("code",pi.session().path("userCode").asText()),200);assertThat(inspection.has("deviceCode")).isFalse();
         var approved=approve(owner,child,pi,"pair-once",200);assertThat(approved.has("accessToken")).isFalse();assertThat(approve(owner,child,pi,"pair-once",200)).isEqualTo(approved);
@@ -290,10 +346,10 @@ class ApiIntegrationTest {
         approve(owner,child,old,"old",409);poll(old,409);
         db.update("UPDATE device_pairings SET expires_at=now()-interval '1 second' WHERE id=:id",p("id",uuid(fresh.session(),"pairingId")));approve(owner,child,fresh,"expired",409);poll(fresh,409);
     }
-    @Test void onlyVerifiedChildManagersCanPair()throws Exception{
+    @Test void onlyChildManagersCanPair()throws Exception{
         var owner=user();var target=user();var child=child(owner);var pi=pi();var invited=invite(owner,target,child,List.of("child:read"));target=accept(owner,target,invited);
         approve(target,uuid(child,"id"),pi,"viewer",403);
-        db.update("UPDATE users SET email_verified=false WHERE id=:id",p("id",owner.user()));approve(owner,uuid(child,"id"),pi,"unverified",403);
+
         var outsider=user();approve(outsider,uuid(child,"id"),pi,"wrong-workspace",404);
         assertThat(db.list("SELECT id FROM devices WHERE identity_id IS NOT NULL",Map.of())).isEmpty();
     }
@@ -303,7 +359,7 @@ class ApiIntegrationTest {
         deviceCall("/me",previous.path("accessToken").asText(),null,401);deviceCall("/me",renewed.path("accessToken").asText(),null,200);poll(pi,401);
     }
     @Test void unlinkStopsTokensAndStreamsAndAllowsExplicitReassignment()throws Exception{
-        var owner=user();var child=child(owner);UUID id=uuid(child,"id");var pi=pi();var paired=approve(owner,id,pi,"pair",200);var credential=poll(pi,200);String token=credential.path("accessToken").asText();
+        var owner=usernameUser();var child=child(owner);UUID id=uuid(child,"id");var pi=pi();var paired=approve(owner,id,pi,"pair",200);var credential=poll(pi,200);String token=credential.path("accessToken").asText();
         deviceCall("/heartbeat",token,p("status","live","observedAt",Instant.now(),"analysisObservedAt",Instant.now(),"confidence",0.9,"safety",p("face","stable","posture","stable","edge","stable","objects","stable")),200);
         var stream=call("POST","/children/"+id+"/stream-token",owner,Map.of(),200);
         call("DELETE","/devices/"+paired.path("deviceId").asText(),owner,null,200);deviceCall("/heartbeat",token,p("status","live","observedAt",Instant.now()),401);
@@ -396,7 +452,7 @@ class ApiIntegrationTest {
         event.put("kind","risk_ended");deviceCall("/sky-eye/events",token,event,409);
     }
     @Test void skyEyeFeedbackNeedsCompletedEpisodeAndActualReceiptAndUnlinkRevokesAccess()throws Exception{
-        var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),episode=UUID.randomUUID();var pi=pi();approve(owner,child,pi,"sky",200);var credentials=poll(pi,200);String token=credentials.path("accessToken").asText();UUID device=uuid(credentials,"deviceId");
+        var owner=usernameUser();var outsider=usernameUser();UUID child=uuid(child(owner),"id"),episode=UUID.randomUUID();var pi=pi();approve(owner,child,pi,"sky",200);var credentials=poll(pi,200);String token=credentials.path("accessToken").asText();UUID device=uuid(credentials,"deviceId");
         deviceCall("/sky-eye/status",token,skyStatus(Instant.now(),false,0,0,episode),200);
         var body=p("deviceId",device,"episodeUid",UUID.randomUUID(),"action","hold");call("POST","/children/"+child+"/sky-eye/feedback",owner,body,422);body.put("episodeUid",episode);
         call("POST","/children/"+child+"/sky-eye/feedback",outsider,body,404);

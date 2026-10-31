@@ -124,7 +124,7 @@ public class SkyEyeService {
         return p("childId",child,"items",items,"serverTime",now);
     }
     @Transactional public Object feedback(Actor actor,UUID child,Feedback body) {
-        policy.verified(actor);policy.require(actor,child,"cry:feedback");
+        policy.require(actor,child,"cry:feedback");
         db.required("SELECT id FROM devices WHERE id=:device AND workspace_id=:ws AND child_id=:child AND revoked_at IS NULL FOR UPDATE",p("device",body.deviceId(),"ws",actor.workspaceId(),"child",child),"DEVICE_NOT_ACCESSIBLE");
         var source=db.required("SELECT body FROM sky_eye_status WHERE device_id=:device",p("device",body.deviceId()),"MODEL_STATUS_NOT_FOUND");
         var status=mapper.convertValue(source.get("body"),Status.class);var personal=status.personalization();

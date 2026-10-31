@@ -9,7 +9,6 @@ from smoke_local import BASE, request
 def main():
     email, password = 'history-test-%s@example.test' % uuid.uuid4(), uuid.uuid4().hex
     account = request('/auth/signup', {'email': email, 'password': password})
-    request('/auth/verify-email', {'token': account['verificationToken']})
     token, workspace = account['accessToken'], account['workspaceId']
     child = request('/children', {'displayName': 'Care history test', 'birthDate': '2026-01-01'}, token, workspace)
     path = '/children/%s/care-history' % child['id']

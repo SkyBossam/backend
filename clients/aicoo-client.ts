@@ -3,7 +3,7 @@ export type UUID = string;
 export type Severity = 'immediate' | 'caution' | 'stable' | 'unknown';
 export type EventStatus = 'new' | 'acknowledged' | 'checking' | 'resolved' | 'unverifiable';
 export type Capability = 'child:read' | 'child:manage' | 'routine:read' | 'routine:write' | 'cry:read' | 'cry:feedback' | 'monitor:live' | 'detection:read' | 'detection:ack' | 'detection:resolve' | 'notification:receive';
-export interface Session { accessToken: string; refreshToken: string; expiresIn: number; userId: UUID; sessionId: UUID; workspaceId?: UUID; membershipId?: UUID; verificationToken?: string }
+export interface Session { accessToken: string; refreshToken: string; expiresIn: number; userId: UUID; sessionId: UUID; username: string; email: string | null; emailVerified: boolean; workspaceId?: UUID; membershipId?: UUID; }
 export interface Child { id: UUID; displayName: string; birthDate: string; workspaceChildId: UUID; capabilities: Capability[] }
 export interface Detection { id: UUID; workspaceId: UUID; childId: UUID; type: string; severity: Severity; status: EventStatus; summary: string; startedAt: string; endedAt: string | null; acknowledgedAt?: string | null }
 export interface Page<T> { items: T[]; nextCursor: string | null }
@@ -45,8 +45,8 @@ export class AicooClient {
     if (!response.ok) throw new ApiError(response.status, data.error?.code ?? 'API_ERROR', data.error?.message ?? '요청에 실패했어요.', data.error?.requestId);
     return data as T;
   }
-  async signup(email: string, password: string) { const session = await this.request<Session>('POST', '/auth/signup', { email, password }); this.setSession(session); return session; }
-  async login(email: string, password: string) { const session = await this.request<Session>('POST', '/auth/login', { email, password }); this.setSession(session); this.workspaceId = null; return session; }
+  async signup(username: string, password: string) { const session = await this.request<Session>('POST', '/auth/signup', { username, password }); this.setSession(session); return session; }
+  async login(username: string, password: string) { const session = await this.request<Session>('POST', '/auth/login', { username, password }); this.setSession(session); this.workspaceId = null; return session; }
   private refresh() {
     if (this.refreshing) return this.refreshing;
     if (!this.session) return Promise.reject(new ApiError(401, 'LOGIN_REQUIRED', '로그인이 필요해요.'));

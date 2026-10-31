@@ -6,14 +6,14 @@
 2. 60초 내 `aicoo-device-v1\npair\n{challengeId}\n{nonce}`의 UTF-8 바이트를 서명합니다. `POST /api/v1/pairing/start`에 `{publicKey, challengeId, nonce, signature}`(서명은 표준 Base64)를 보냅니다.
 3. 응답의 `userCode`·`verificationUriComplete`·`fingerprint`는 보호자에게 표시합니다. `deviceCode`는 파이만 보관합니다. 두 코드는 서로 다른 값이고 5분 동안 유효합니다.
 4. 보호자는 JWT와 `X-Workspace-Id`로 `POST /api/v1/device-pairings/inspect`에 `{code}`를 보내 확인값·만료 시각을 조회합니다.
-5. 이메일 인증과 해당 아이의 `child:manage`, `child:read` 권한을 가진 보호자가 `POST /api/v1/device-pairings/approve`에 `{code, childId, name}`을 보냅니다. `Idempotency-Key`는 같은 승인 재시도에서 유지합니다.
+5. 로그인한 계정으로 해당 아이의 `child:manage`, `child:read` 권한을 가진 보호자가 `POST /api/v1/device-pairings/approve`에 `{code, childId, name}`을 보냅니다. `Idempotency-Key`는 같은 승인 재시도에서 유지합니다.
 6. 파이는 3초 이상 간격으로 `POST /api/v1/pairing/token`에 `{deviceCode}`를 보내 `pending` 또는 기기 토큰을 받습니다. 보호자 응답에는 토큰을 반환하지 않습니다. 승인된 응답의 네트워크 유실은 만료 전 동일 private code로 복구할 수 있습니다.
 7. 이후 파이는 기기별 30일 토큰을 `X-Device-Token`으로 사용합니다. 재시작·만료 시 목적 `authenticate`로 새 challenge를 서명하여 `POST /api/v1/device/authenticate`에 제출합니다. 새 토큰 발급 시 이전 토큰이 폐기됩니다.
 
 ## 조회·해제
 
 - `GET /api/v1/children/{childId}/devices`: 현재 공간·아이의 기기 목록. `connected`는 최근 30초 내 heartbeat 여부입니다. `state`는 영상/분석 상태와 구분해 표시합니다.
-- `DELETE /api/v1/devices/{deviceId}`: 이메일 인증 + 아이 관리 권한 필요. 기기 토큰, 영상 토큰, 미완료 모니터링 세션을 종료합니다. 이전 기록은 삭제·이동하지 않습니다.
+- `DELETE /api/v1/devices/{deviceId}`: 로그인 + 아이 관리 권한 필요. 기기 토큰, 영상 토큰, 미완료 모니터링 세션을 종료합니다. 이전 기록은 삭제·이동하지 않습니다.
 - 같은 키로 다시 연결하려면 기존 보호자가 앱에서 해제하거나 파이의 키 서명으로 직접 해제해야 합니다. 해제 후 새 등록은 새 device ID를 가집니다.
 
 ### 파이에서 직접 해제
@@ -32,7 +32,7 @@
 - 기기 쓰기 API는 서버의 binding에서 공간·아이·source를 주입합니다. 토큰을 일반 사용자 JWT나 전역 worker 인증에 사용할 수 없습니다.
 - 코드 조회·승인은 사용자별 15분당 10회, IP별 30회로 제한합니다. challenge는 IP별 40회, start는 20회, private poll은 600회입니다. 프록시 사용 시 신뢰하는 프록시에서만 클라이언트 IP를 복원하도록 별도 구성해야 합니다. 기본은 요청의 remote address를 사용합니다.
 - 소프트웨어 키는 물리적 하드웨어 식별·공장 인증서가 아닙니다. 키 파일을 지우면 새 소프트웨어 identity가 만들어집니다.
-- `FRONTEND_URL`은 보호자에게 접근 가능한 주소로 설정합니다. 운영 환경은 HTTPS와 SMTP 설정이 필요합니다.
+- `FRONTEND_URL`은 보호자에게 접근 가능한 주소로 설정합니다. 운영 환경은 HTTPS가 필요합니다. 기기 연결에는 이메일·SMTP 설정이 필요하지 않습니다.
 - V4 Flyway migration이 추가 테이블·컬럼을 생성합니다. 기존 worker 장치 등록 API는 호환성을 위해 남아 있지만 일반 파이에는 페어링 API를 사용합니다.
 
 설치·실행은 [파이 안내](../raspberry-pi/README.md)를 참고하세요.

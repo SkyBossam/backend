@@ -8,12 +8,16 @@ Base URL: `http://127.0.0.1:8080/api/v1`. JSON의 시각은 UTC ISO 8601이고, 
 POST /api/v1/auth/signup
 Content-Type: application/json
 
-{"email":"parent@example.test","password":"your-unique-password"}
+{"username":"aicoo_parent","password":"your-unique-password"}
 ```
 
-201 응답의 `accessToken`, `refreshToken`, `workspaceId`, `membershipId`를 사용합니다. 로컬 모드에서는 `verificationToken`도 반환합니다. 이 코드를 `POST /auth/verify-email`의 `{"token":"..."}`로 제출해야 초대·기관 생성·공유를 사용할 수 있습니다. 운영 모드에서는 코드가 메일로 전달되고 HTTP 응답에는 포함되지 않습니다.
+201 응답의 `accessToken`, `refreshToken`, `username`, `workspaceId`, `membershipId`를 사용합니다. 회원가입에는 아이디와 비밀번호만 필요하며 이메일 확인 코드를 발급하거나 발송하지 않습니다. 이메일이 없는 계정의 `email`은 `null`, `emailVerified`는 `false`입니다. 기기 등록·해제·모델 피드백에는 이메일 인증이 필요하지 않습니다.
 
-`POST /auth/login`은 같은 이메일/비밀번호 형식입니다. 로그인 후 `GET /me/workspaces`로 공간을 선택합니다. 이후 요청은 `Authorization: Bearer ...`, `X-Workspace-Id: ...`를 지정합니다. `POST /auth/refresh`에 `{"refreshToken":"..."}`를 보내면 이전 refresh/access 토큰이 폐기되고 새 쌍을 받습니다. 회전은 클라이언트에서 한 번에 하나씩 진행하세요. 폐기된 refresh token 재사용 시 해당 세션 계열 전체가 종료됩니다.
+`POST /auth/login`은 같은 `username`/`password` 형식입니다. 아이디는 대소문자를 구분하지 않는 1~32자의 영문·숫자·점·밑줄·하이픈이며 영문·숫자로 시작합니다. 중복은 `409 USERNAME_UNAVAILABLE`입니다. V8은 기존 이메일 앞부분을 아이디로 배정하고 중복에 숫자 접미사를 붙입니다. 유효하지 않은 앞부분은 `user_`와 UUID 일부로 배정합니다. 기존 UUID·비밀번호·아이·기기 연결·기록은 유지됩니다. 기존 이메일 로그인 및 이메일만 보내는 이전 가입 API는 호환되지만 가입 시 인증 메일은 보내지 않습니다.
+
+로그인 후 `GET /me/workspaces`로 공간을 선택합니다. 이후 요청은 `Authorization: Bearer ...`, `X-Workspace-Id: ...`를 지정합니다. `POST /auth/refresh`에 `{"refreshToken":"..."}`를 보내면 이전 refresh/access 토큰이 폐기되고 새 쌍을 받습니다. 회전은 클라이언트에서 한 번에 하나씩 진행하세요. 폐기된 refresh token 재사용 시 해당 세션 계열 전체가 종료됩니다.
+
+기존 이메일 기반 초대·공유 API의 이메일 소유 확인 정책은 유지합니다. 이메일이 있는 기존 계정은 `/auth/request-verification`을 명시적으로 호출할 수 있고 로컬 모드에서는 이 응답에만 `verificationToken`이 반환됩니다. 일반 가입·기기 연결 화면은 이 API를 사용하지 않습니다.
 
 웹 어댑터는 토큰을 메모리에만 보관합니다. 새로고침 후 영구 로그인이 필요한 배포에서는 별도 BFF의 Secure·HttpOnly 쿠키와 CSRF 방어를 설계하세요. refresh token을 localStorage나 URL에 넣지 마세요.
 

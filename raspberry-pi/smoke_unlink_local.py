@@ -10,7 +10,6 @@ from start_aicoo import main as launch
 
 def main():
     account = request('/auth/signup', {'email': 'unlink-test-%s@example.test' % uuid.uuid4(), 'password': uuid.uuid4().hex})
-    request('/auth/verify-email', {'token': account['verificationToken']})
     token, workspace = account['accessToken'], account['workspaceId']
     child = request('/children', {'displayName': 'Local unlink fixture', 'birthDate': '2026-01-01'}, token, workspace)
     with tempfile.TemporaryDirectory(prefix='aicoo-unlink-test-') as folder:

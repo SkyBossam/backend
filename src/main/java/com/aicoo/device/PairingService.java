@@ -69,9 +69,9 @@ public class PairingService {
         if(!instant(row,"expires_at").isAfter(Instant.now()))throw ApiException.conflict("PAIRING_EXPIRED");
         if(!"pending".equals(row.get("status"))&&!actor.userId().equals(row.get("approved_by")))throw ApiException.conflict("PAIRING_ALREADY_USED");
     }
-    public Object inspect(Actor actor,Code body){policy.verified(actor);var row=findCode(body.code());pendingOrOwn(row,actor);var identity=db.required("SELECT public_key_hash FROM device_identities WHERE id=:id",p("id",row.get("identity_id")),"DEVICE_NOT_FOUND");return p("pairingId",row.get("id"),"status",row.get("status"),"expiresAt",row.get("expires_at"),"fingerprint",text(identity,"public_key_hash").substring(0,12),"deviceType","camera");}
+    public Object inspect(Actor actor,Code body){var row=findCode(body.code());pendingOrOwn(row,actor);var identity=db.required("SELECT public_key_hash FROM device_identities WHERE id=:id",p("id",row.get("identity_id")),"DEVICE_NOT_FOUND");return p("pairingId",row.get("id"),"status",row.get("status"),"expiresAt",row.get("expires_at"),"fingerprint",text(identity,"public_key_hash").substring(0,12),"deviceType","camera");}
     @Transactional public Object approve(Actor actor,Approval body,String idempotencyKey){
-        policy.verified(actor);var link=policy.require(actor,body.childId(),"child:manage");policy.require(actor,body.childId(),"child:read");var found=findCode(body.code());
+        var link=policy.require(actor,body.childId(),"child:manage");policy.require(actor,body.childId(),"child:read");var found=findCode(body.code());
         var identity=db.required("SELECT * FROM device_identities WHERE id=:id FOR UPDATE",p("id",found.get("identity_id")),"DEVICE_NOT_FOUND");
         var row=db.required("SELECT * FROM device_pairings WHERE id=:id FOR UPDATE",p("id",found.get("id")),"PAIRING_CODE_NOT_FOUND");pendingOrOwn(row,actor);
         return idem.execute(actor.membershipId(),idempotencyKey,"device.pair",p("code",normalized(body.code()),"childId",body.childId(),"name",body.name().trim()),()->{
@@ -113,7 +113,7 @@ public class PairingService {
     }
     public Object list(Actor actor,UUID child){policy.require(actor,child,"child:read");boolean manage=policy.allowed(actor,child,"child:manage");var rows=db.list("SELECT d.*,i.public_key_hash FROM devices d JOIN device_identities i ON i.id=d.identity_id WHERE d.workspace_id=:ws AND d.child_id=:child AND d.revoked_at IS NULL ORDER BY d.created_at,d.id",p("ws",actor.workspaceId(),"child",child));return p("items",rows.stream().map(r->p("id",r.get("id"),"name",r.get("display_name"),"childId",child,"state",r.get("state"),"connected",r.get("last_seen_at")!=null&&instant(r,"last_seen_at").isAfter(Instant.now().minusSeconds(30)),"lastSeenAt",r.get("last_seen_at"),"pairedAt",r.get("created_at"),"fingerprint",text(r,"public_key_hash").substring(0,12),"canManage",manage)).toList());}
     @Transactional public Object unlink(Actor actor,UUID id){
-        var found=db.required("SELECT * FROM devices WHERE id=:id AND workspace_id=:ws",p("id",id,"ws",actor.workspaceId()),"DEVICE_NOT_ACCESSIBLE");policy.require(actor,id(found,"child_id"),"child:manage");policy.verified(actor);
+        var found=db.required("SELECT * FROM devices WHERE id=:id AND workspace_id=:ws",p("id",id,"ws",actor.workspaceId()),"DEVICE_NOT_ACCESSIBLE");policy.require(actor,id(found,"child_id"),"child:manage");
         if(found.get("identity_id")==null)throw ApiException.invalid("DEVICE_NOT_PAIRABLE");
         db.required("SELECT id FROM device_identities WHERE id=:id FOR UPDATE",p("id",found.get("identity_id")),"DEVICE_NOT_FOUND");db.required("SELECT id FROM devices WHERE id=:id FOR UPDATE",p("id",id),"DEVICE_NOT_FOUND");
         revoke(found);
