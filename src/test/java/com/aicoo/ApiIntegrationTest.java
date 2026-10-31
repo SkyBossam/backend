@@ -242,7 +242,7 @@ class ApiIntegrationTest {
         }assertThat(db.list("SELECT id FROM care_feedback",Map.of())).hasSize(1);
     }
     @Test void feedbackCannotReferenceAnotherEventOrNonCry()throws Exception{
-        var owner=user();UUID child=uuid(child(owner),"id"),camera=camera(owner,child);UUID a=uuid(detection(owner,child,camera,"cry","caution",Instant.now().minusSeconds(20)),"id"),b=uuid(detection(owner,child,camera,"cry","caution",Instant.now().minusSeconds(3)),"id");UUID action=uuid(analysis(owner,a).path("actions").get(0),"id");
+        var owner=user();UUID child=uuid(child(owner),"id"),camera=camera(owner,child);UUID a=uuid(detection(owner,child,camera,"cry","caution",Instant.now().minusSeconds(20)),"id"),b=uuid(detection(owner,child,camera(owner,child),"cry","caution",Instant.now().minusSeconds(3)),"id");UUID action=uuid(analysis(owner,a).path("actions").get(0),"id");
         call("POST","/events/"+b+"/feedback",owner,p("attempts",List.of(p("actionId",action,"state","attempted")),"response","reduced"),"foreign-action",404);
         UUID risk=uuid(detection(owner,child,camera,"face_covered","immediate",Instant.now().minusSeconds(2)),"id");call("POST","/events/"+risk+"/feedback",owner,p("attempts",List.of(),"response","unknown"),"non-cry",422);
         assertThat(db.list("SELECT id FROM care_feedback",Map.of())).isEmpty();
@@ -257,7 +257,8 @@ class ApiIntegrationTest {
     }
     @Test void keysetCursorsHaveNoDuplicatesAndAreBoundToChild()throws Exception{
         var owner=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id"),camera=camera(owner,child);Instant at=Instant.now().minusSeconds(10);
-        for(int i=0;i<3;i++)detection(owner,child,camera,"cry","caution",at);
+        // Independent bound devices create independent cries, even at the same timestamp.
+        for(int i=0;i<3;i++)detection(owner,child,camera(owner,child),"cry","caution",at);
         var first=call("GET","/children/"+child+"/events?type=cry&limit=2",owner,null,200);String cursor=first.path("nextCursor").asText();var second=call("GET","/children/"+child+"/events?type=cry&limit=2&cursor="+cursor,owner,null,200);
         assertThat(first.path("items").size()).isEqualTo(2);assertThat(second.path("items").size()).isEqualTo(1);assertThat(List.of(first.path("items").get(0).path("id").asText(),first.path("items").get(1).path("id").asText())).doesNotContain(second.path("items").get(0).path("id").asText());
         call("GET","/children/"+other+"/events?type=cry&cursor="+cursor,owner,null,422);call("GET","/children/"+child+"/events?limit=101",owner,null,422);
@@ -523,6 +524,56 @@ class ApiIntegrationTest {
         assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).isEqualTo(cries);
         assertThat(call("GET","/children/"+other+"/care-history?kind=cries",owner,null,200).path("items")).isEmpty();
         assertThat(call("GET","/children/"+child+"/summary?date="+at.atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),owner,null,200).path("cryCount").asInt()).isEqualTo(1);
+    }
+    @Test void continuousCryWaitsForCaregiverAndKeepsFollowupHistory()throws Exception{
+        var owner=usernameUser();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"cry-followup",200);String token=poll(pi,200).path("accessToken").asText();
+        Instant at=Instant.now().minusSeconds(300);String path="/children/"+child+"/care-history";
+        for(int n=0;n<3;n++) {
+            Instant began=at.plusSeconds(n*40);
+            deviceCall("/sky-eye/events",token,p("id",("a"+n).repeat(32),"episodeKey","part:"+n,"kind","cry_started","observedAt",began,"startedAt",began),200);
+            if(n<2)deviceCall("/sky-eye/events",token,p("id",("e"+n).repeat(32),"episodeKey","part:"+n,"kind","cry_ended","observedAt",began.plusSeconds(30),"startedAt",began,"endedAt",began.plusSeconds(30)),200);
+        }
+        var cries=call("GET",path+"?kind=cries",owner,null,200).path("items");assertThat(cries).hasSize(1);String event=cries.get(0).path("id").asText();
+        var body=changes();var note=p("eventId",event,"actions",List.of("hug"),"note","안아 주었어요","response","continues");body.put("feedback",List.of(note));
+        var first=call("PUT",path,owner,body,"first-response",200).path("feedback").get(0);assertThat(first.path("version").asInt()).isEqualTo(1);
+        note.put("version",1);note.put("response","reduced");note.put("actions",List.of("diaper"));
+        var second=call("PUT",path,owner,body,"second-response",200).path("feedback").get(0);assertThat(second.path("history")).hasSize(1);assertThat(second.path("history").get(0).path("response").asText()).isEqualTo("continues");
+        call("PUT",path,owner,body,"stale-response",409);
+        note.put("version",2);note.put("response","stopped");
+        var saved=call("PUT",path,owner,body,"stopped-response",200);assertThat(call("PUT",path,owner,body,"stopped-response",200)).isEqualTo(saved);
+        var persisted=call("GET",path+"?kind=feedback",owner,null,200).path("items").get(0);assertThat(persisted.path("version").asInt()).isEqualTo(3);assertThat(persisted.path("history")).hasSize(2);assertThat(persisted.path("response").asText()).isEqualTo("stopped");
+        // A replay of a segment from the same cry must not reopen an alert.
+        deviceCall("/sky-eye/events",token,p("id","d".repeat(64),"episodeKey","part:2","kind","cry_started","observedAt",at.plusSeconds(80),"startedAt",at.plusSeconds(80)),200);
+        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).hasSize(1);
+        Instant ongoing=Instant.now().plusSeconds(1);
+        deviceCall("/sky-eye/events",token,p("id","9".repeat(64),"episodeKey","unbroken","kind","cry_started","observedAt",ongoing,"startedAt",ongoing),200);
+        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).hasSize(1);
+        deviceCall("/sky-eye/events",token,p("id","8".repeat(64),"episodeKey","part:2","kind","cry_ended","observedAt",ongoing.plusSeconds(1),"startedAt",at.plusSeconds(80),"endedAt",ongoing.plusSeconds(1)),200);
+        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items").get(0).path("durationSec").isNull()).isTrue();
+        deviceCall("/sky-eye/events",token,p("id","7".repeat(64),"episodeKey","unbroken","kind","cry_ended","observedAt",ongoing.plusSeconds(2),"startedAt",ongoing,"endedAt",ongoing.plusSeconds(2)),200);
+        Instant next=ongoing.plusSeconds(3);
+        deviceCall("/sky-eye/events",token,p("id","f".repeat(64),"episodeKey","next:cry","kind","cry_started","observedAt",next,"startedAt",next),200);
+        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).hasSize(2);
+        assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).isEmpty();
+    }
+    @Test void repeatedWorkerCrySendsOneNotificationUntilQuietAndHandled()throws Exception{
+        var owner=usernameUser();UUID child=uuid(child(owner),"id"),camera=camera(owner,child);Instant at=Instant.now().minusSeconds(300);
+        var first=detection(owner,child,camera,"cry","caution",at);
+        var repeat=detection(owner,child,camera,"cry","immediate",at.plusSeconds(120));
+        assertThat(repeat.path("id")).isEqualTo(first.path("id"));assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).hasSize(1);
+        var body=changes();body.put("feedback",List.of(p("eventId",first.path("id").asText(),"actions",List.of("hug"),"note","","response","stopped")));
+        call("PUT","/children/"+child+"/care-history",owner,body,"handled",200);
+        var next=detection(owner,child,camera,"cry","caution",Instant.now().plusSeconds(1));assertThat(next.path("id")).isNotEqualTo(first.path("id"));
+        assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).hasSize(2);
+    }
+    @Test void concurrentModelSegmentsShareOneWaitingCry()throws Exception{
+        var owner=usernameUser();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"concurrent-cry",200);String token=poll(pi,200).path("accessToken").asText();Instant at=Instant.now().minusSeconds(10);
+        try(var pool=Executors.newVirtualThreadPerTaskExecutor()) {
+            var tasks=new ArrayList<Future<JsonNode>>();
+            for(int n=0;n<2;n++){int index=n;tasks.add(pool.submit(()->deviceCall("/sky-eye/events",token,p("id",("c"+index).repeat(32),"episodeKey","concurrent:"+index,"kind","cry_started","observedAt",at,"startedAt",at),200)));}
+            for(var task:tasks)task.get(10,TimeUnit.SECONDS);
+        }
+        assertThat(call("GET","/children/"+child+"/care-history?kind=cries",owner,null,200).path("items")).hasSize(1);
     }
     @Test void dailyRecordsPersistPaginateAndRejectStaleAtomicEdits()throws Exception{
         var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");String path="/children/"+child+"/care-history";

@@ -44,13 +44,22 @@ public class EventService {
         }
         boolean verifiable=body.verifiable()&&body.confidence()!=null&&body.confidence()>=threshold&&!Set.of("camera_obstructed","connection_lost").contains(body.type());
         String severity=verifiable?body.severity():"unknown",status=verifiable?"new":"unverifiable";
-        // Only join recent, still-open detections from the identical bound source and type.
+        // Other risks keep their short grouping window; cries wait for caregiver handling below.
         var group=db.one("SELECT * FROM detection_events WHERE workspace_id=:ws AND child_id=:child AND source_id=:s AND type=:type AND status IN ('new','acknowledged','checking','unverifiable') AND ended_at IS NULL AND last_observed_at BETWEEN :since AND :at AND verifiable=:verifiable ORDER BY last_observed_at DESC LIMIT 1 FOR UPDATE",p("ws",body.workspaceId(),"child",body.childId(),"s",body.sourceId(),"type",body.type(),"since",body.startedAt().minusSeconds(15),"at",body.startedAt(),"verifiable",verifiable));
+        if("cry".equals(body.type())) {
+            group=db.one("SELECT e.* FROM detection_events e WHERE e.workspace_id=:ws AND e.child_id=:child AND e.source_id=:s AND e.type='cry' ORDER BY e.started_at DESC,e.id DESC LIMIT 1 FOR UPDATE",p("ws",body.workspaceId(),"child",body.childId(),"s",body.sourceId()));
+            if(group.isPresent()) {
+                var latest=group.get();
+                var response=db.one("SELECT response,updated_at FROM care_feedback WHERE event_id=:e ORDER BY updated_at DESC,id DESC LIMIT 1",p("e",latest.get("id")));
+                boolean stopped=response.isPresent()&&"stopped".equals(response.get().get("response"));
+                if(body.startedAt().isBefore(instant(latest,"started_at")) || stopped&&latest.get("ended_at")!=null&&body.startedAt().isAfter(instant(latest,"ended_at"))&&body.startedAt().isAfter(instant(response.get(),"updated_at")))group=Optional.empty();
+            }
+        }
         UUID eventId;
         if(group.isPresent()) {
             eventId=id(group.get(),"id");String oldSeverity=text(group.get(),"severity");
             severity=priority(oldSeverity)<priority(severity)?oldSeverity:severity;
-            db.update("UPDATE detection_events SET ended_at=:end,last_observed_at=:at,severity=:severity WHERE id=:id",p("id",eventId,"end",body.endedAt(),"at",body.startedAt(),"severity",severity));
+            db.update("UPDATE detection_events SET ended_at=CASE WHEN :at>=last_observed_at THEN :end ELSE ended_at END,last_observed_at=greatest(last_observed_at,:at),severity=:severity WHERE id=:id",p("id",eventId,"end",body.endedAt(),"at",body.startedAt(),"severity",severity));
         } else {
             eventId=UUID.randomUUID();
             db.update("INSERT INTO detection_events(id,workspace_id,workspace_child_id,child_id,source_id,type,severity,status,started_at,ended_at,last_observed_at,verifiable,model_version,confidence,summary) VALUES(:id,:ws,:wc,:child,:s,:type,:severity,:status,:start,:end,:at,:verifiable,:model,:confidence,:summary)",p("id",eventId,"ws",body.workspaceId(),"wc",device.get("workspace_child_id"),"child",body.childId(),"s",body.sourceId(),"type",body.type(),"severity",severity,"status",status,"start",body.startedAt(),"end",body.endedAt(),"at",body.startedAt(),"verifiable",verifiable,"model",body.modelVersion(),"confidence",body.confidence(),"summary",summary(body.type(),verifiable)));
@@ -58,7 +67,7 @@ public class EventService {
         }
         db.update("INSERT INTO detection_receipts(source_id,source_event_id,event_id,request_hash) VALUES(:s,:key,:event,:hash)",p("s",body.sourceId(),"key",body.sourceEventId(),"event",eventId,"hash",hash));
         var event=db.required("SELECT * FROM detection_events WHERE id=:id",p("id",eventId),"EVENT_NOT_FOUND");
-        if(group.isEmpty()||!Objects.equals(group.get().get("severity"),severity))outbox.enqueue(event,group.isEmpty()?"detection.created":"detection.updated");
+        if(group.isEmpty()||!"cry".equals(body.type())&&!Objects.equals(group.get().get("severity"),severity))outbox.enqueue(event,group.isEmpty()?"detection.created":"detection.updated");
         return eventView(event);
     }
 

@@ -21,7 +21,7 @@ public class CareHistoryService {
         @NotBlank @Pattern(regexp="todo|in_progress|done") String status) {}
     public record SleepWrite(@NotNull UUID id,@Positive Long version,@NotNull Instant startedAt,@NotNull Instant endedAt) {}
     public record Delete(@NotNull UUID id,@NotNull @Positive Long version) {}
-    public record FeedbackWrite(@NotNull UUID eventId,
+    public record FeedbackWrite(@NotNull UUID eventId,@Positive Long version,
         @NotNull @Size(min=1,max=10) List<@NotBlank @Size(max=206) String> actions,
         @NotNull @Size(max=1000) String note,
         @NotBlank @Pattern(regexp="stopped|reduced|continues|unknown") String response) {}
@@ -69,12 +69,12 @@ public class CareHistoryService {
 
     private Map<String,Object> recordView(String kind,Map<String,Object> row) {
         return switch(kind) {
-            case "cries" -> p("id",row.get("id"),"childId",row.get("child_id"),"startedAt",row.get("started_at"),
+            case "cries" -> p("id",row.get("id"),"childId",row.get("child_id"),"sourceId",row.get("source_id"),"lastObservedAt",row.get("last_observed_at"),"startedAt",row.get("started_at"),
                 "durationSec",row.get("ended_at")==null?null:Duration.between(instant(row,"started_at"),instant(row,"ended_at")).getSeconds(),
                 "cause","원인 확인 필요","analysisAvailable",false);
             case "routines" -> view(row,"id","child_id","type","title","note","scheduled_at","ended_at","status","version");
             case "sleepRecords" -> view(row,"id","child_id","started_at","ended_at","version");
-            default -> view(row,"event_id","child_id","actions","note","response","created_at");
+            default -> view(row,"event_id","child_id","actions","note","response","created_at","updated_at","version","history");
         };
     }
 
@@ -138,9 +138,16 @@ public class CareHistoryService {
         var previous=db.one("SELECT *, :child AS child_id FROM care_feedback WHERE event_id=:event AND membership_id=:member",params);
         if(previous.isPresent()) {
             var old=previous.get();
-            if(!Objects.equals(old.get("actions"),f.actions())||!Objects.equals(old.get("note"),f.note())||!Objects.equals(old.get("response"),f.response()))throw ApiException.conflict("FEEDBACK_ALREADY_RECORDED");
-            return recordView("feedback",old);
+            if(f.version()==null) {
+                if(!Objects.equals(old.get("actions"),f.actions())||!Objects.equals(old.get("note"),f.note())||!Objects.equals(old.get("response"),f.response()))throw ApiException.conflict("FEEDBACK_ALREADY_RECORDED");
+                return recordView("feedback",old);
+            }
+            if(((Number)old.get("version")).longValue()!=f.version())throw ApiException.conflict("CARE_RECORD_CHANGED");
+            params.putAll(p("actions",db.json(f.actions()),"note",f.note(),"response",f.response()));
+            db.update("UPDATE care_feedback SET history=history || jsonb_build_array(jsonb_build_object('actions',actions,'note',note,'response',response,'createdAt',updated_at)), actions=cast(:actions as jsonb),note=:note,response=:response,version=version+1,updated_at=now() WHERE event_id=:event AND membership_id=:member",params);
+            return recordView("feedback",db.required("SELECT *, :child AS child_id FROM care_feedback WHERE event_id=:event AND membership_id=:member",params,"FEEDBACK_NOT_FOUND"));
         }
+        if(f.version()!=null)throw ApiException.conflict("CARE_RECORD_CHANGED");
         params.putAll(p("id",UUID.randomUUID(),"actions",db.json(f.actions()),"note",f.note(),"response",f.response(),"key","care:"+f.eventId()));
         db.update("INSERT INTO care_feedback(id,event_id,membership_id,workspace_id,response,note,idempotency_key,actions) VALUES(:id,:event,:member,:ws,:response,:note,:key,cast(:actions as jsonb))",params);
         return recordView("feedback",db.required("SELECT *, :child AS child_id FROM care_feedback WHERE id=:id",params,"FEEDBACK_NOT_FOUND"));
