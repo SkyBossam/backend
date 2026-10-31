@@ -2,6 +2,43 @@
 
 2026-11-01 통합 패키지의 `sky-eye.status.v1` / `sky-eye.event.v1` 파일 인터페이스용 전송기입니다. Pi 4 / ARMv7 / Python 3.9에서 사용할 수 있는 표준 라이브러리와 기존 Ed25519 인증만 사용합니다. 모델, NCNN, TFLite, 개인 프로필을 재설치하거나 업로드하지 않습니다.
 
+## 권장: 파이에서 명령 하나로 실행
+
+이미 저장소를 받았다면 한 번 업데이트합니다.
+
+```bash
+cd ~/backend
+git pull --ff-only
+bash raspberry-pi/start-aicoo.sh
+```
+
+다음부터는 `bash ~/backend/raspberry-pi/start-aicoo.sh`만 실행합니다.
+
+1. 기존 `~/.local/share/aicoo/server.json`의 서버 주소와 장기 기기 키를 읽습니다. 이전에 코드 승인을 완료했다면 재입력 없이 인증을 복구합니다.
+2. 주소가 없는 최초 실행만 PC 주소를 한 번 물어봅니다. 자동 실행용 설정은 `~/.config/aicoo/launcher.json`에 저장합니다. 매번 export할 필요가 없습니다.
+3. PC 백엔드에 연결될 때까지 기다립니다. 처음 등록하는 기기는 코드를 표시하고 PC 앱에서 승인을 기다린 뒤 **같은 실행 안에서** 다음 단계로 진행합니다.
+4. 설치된 카메라·울음·통합 출력 서비스를 시작합니다. 이미 실행 중인 모델은 재시작하지 않으며, 선택된 objects 모델도 임의로 바꾸지 않습니다.
+5. 분석 데이터·이벤트·피드백과 **최대 2fps의 카메라 미리보기**를 전송합니다. Ctrl+C로 전송을 멈춥니다. 모델 서비스 자체는 계속 실행됩니다.
+
+Python 인증 패키지가 없으면 실행 스크립트가 apt 설치를 진행합니다. `sudo bash`로 실행하지 말고 모델을 설치한 Pi 사용자로 실행하세요. PC에서는 백엔드 `start-local.ps1 -Lan`과 프론트가 실행 중이어야 합니다. 이 명령이 꺼진 PC를 켜거나 방화벽을 변경하지는 않습니다.
+
+연결 코드 승인은 완료했는데 기기 목록이 대기 상태라면, 아직 파이 전송 프로그램이 실행되지 않은 것입니다. 기기를 삭제하거나 다시 등록하지 않고 위 실행 명령으로 이어갑니다. 기존 `aicoo_device.py run`, `sky_eye_bridge.py`, `aicoo-sky-eye` 서비스가 있다면 먼저 중지하고 하나만 실행하세요.
+
+```bash
+# 기본 설치 위치가 다른 경우 (설정은 다음 실행에 재사용)
+bash ~/backend/raspberry-pi/start-aicoo.sh --sky-eye-dir /실제/모델/폴더
+# 별도 방식으로 이미 모델을 실행 중인 경우
+bash ~/backend/raspberry-pi/start-aicoo.sh --no-start-model
+# 영상 없이 데이터만 보낼 경우
+bash ~/backend/raspberry-pi/start-aicoo.sh --no-camera
+```
+
+## 카메라 미리보기
+
+기존 Sky Eye가 제공하는 파이 루프백 `127.0.0.1:8765/api/status`와 `/frame.jpg`를 읽습니다. 카메라 장치를 새로 열지 않으므로 추론 프로그램과 충돌하지 않습니다. 프레임은 기기 인증으로 PC에 보내며, 앱은 사용자 로그인과 해당 아이의 `monitor:live` 권한으로만 가져옵니다. 공개 영상 URL이나 별도 SSH 터널은 필요하지 않습니다.
+
+프레임은 서버 메모리에 최신 한 장만 보관하고 디스크에 녹화하지 않습니다. 원본 시각과 미리보기 나이를 검사하며 오래된 영상은 다시 현재 시각으로 찍어 보내지 않습니다. 서버는 3초 지난 영상을 반환하지 않고, 앱도 새 응답이 끊기면 마지막 화면을 지웁니다. 영상이 보여도 AI가 아이의 자세·얼굴을 판단하지 못하면 해당 분석 상태는 확인 불가일 수 있습니다. 음성 재생은 포함하지 않습니다.
+
 ## 최초 연결
 
 PC에서 백엔드와 프론트엔드를 실행합니다.
@@ -42,7 +79,7 @@ python3 raspberry-pi/sky_eye_bridge.py --allow-http         # 창 유지, 계속
 
 기본 입력은 `~/sky-eye/output/status.json`, `~/sky-eye/output/events.jsonl`입니다. 다르면 `--sky-eye-dir /실제/sky-eye/폴더`를 지정합니다. Windows PC에서 이 전송기를 실행하는 것이 아니라 **파일이 있는 파이에서** 실행합니다. HTTPS 운영 서버는 `--allow-http`를 생략합니다.
 
-아이쿠의 **모니터링**에서 자세·얼굴 관측, 울음 후보, 실험적 돌봄 힌트, 최근 30개 관측 이벤트를 확인합니다. 홈의 안전 상태도 실제 기기 분석으로 갱신합니다. 기존 체험 모드 및 앱의 수동 기록과 기기 기록은 구분됩니다. 현재 연결은 **분석 데이터**입니다. 영상 재생은 구현하지 않았으며 기존 파이 미리보기는 문서의 SSH 터널 `ssh -L 8765:127.0.0.1:8765 pi@파이_IP`로 따로 볼 수 있습니다.
+아이쿠의 **모니터링**에서 자세·얼굴 관측, 울음 후보, 실험적 돌봄 힌트, 최근 30개 관측 이벤트를 확인합니다. 홈의 안전 상태도 실제 기기 분석으로 갱신합니다. 기존 체험 모드 및 앱의 수동 기록과 기기 기록은 구분됩니다. 현재 연결은 **분석 데이터와 카메라 미리보기**입니다. 기존 파이 자체 미리보기 화면을 따로 열고 싶을 때만 문서의 SSH 터널을 사용합니다.
 
 ## 보호자 피드백
 
@@ -56,7 +93,7 @@ python3 raspberry-pi/sky_eye_bridge.py --allow-http         # 창 유지, 계속
 
 ## 재부팅 자동 실행 (선택)
 
-제공된 `aicoo-sky-eye.service`는 **사용자 서비스**입니다. ExecStart의 저장소 위치를 실제 경로에 맞추세요. 기본 예시는 `~/backend`와 로컬 HTTP입니다.
+제공된 `aicoo-sky-eye.service`는 **사용자 서비스**입니다. ExecStart의 저장소 위치를 실제 경로에 맞추세요. 기본 예시는 `~/backend`이며 위 실행 스크립트가 저장한 설정을 사용합니다. 기존 `bridge.env` 설정도 있으면 읽습니다.
 
 ```bash
 mkdir -p ~/.config/aicoo ~/.config/systemd/user
@@ -76,7 +113,7 @@ journalctl --user -u aicoo-sky-eye -f
 - 상태 약 2초 전송, 앱 약 2.5초 조회. 파일 시각뿐 아니라 각 입력의 UNIX 시각을 검사합니다. 중단·오래된 파일·낮은 신뢰도는 확인 불가입니다. 입력별로 만료하며 앱도 마지막 응답을 계속 정상으로 표시하지 않습니다.
 - 자세/얼굴의 confidence 0.6 이상만 정상/위험 상태에 반영합니다. 주변 물체 정책이 없으면 unknown, 침대 영역 미보정은 가장자리 unknown입니다. Pi CPU 온도를 실내 온도로 사용하지 않습니다.
 - 줄 끝의 개행이 도착하기 전에는 이벤트를 읽지 않습니다. 서버 확인 후 커서를 저장합니다. `(deviceId, id)`로 멱등 처리하며, 파일 회전/잘림도 감지합니다. 영구적으로 잘못된 이벤트는 최근 100개까지 `bridge-errors.json`에 내용 없는 진단만 남깁니다.
-- 원본 video monotonic 시각은 대응 UNIX 시각으로 변환합니다. risk_ended와 risk_interrupted를 보호자의 위험 해소로 처리하지 않습니다. 과거 로그는 기록으로 저장하고 새 푸시 알림을 발송하지 않습니다. 앱 알림 목록에는 30초 이내의 신규 시작 관측만 잠시 표시하며 모바일 백그라운드 푸시는 이 연결에 포함되지 않습니다.
+- 원본 video monotonic 시각은 대응 UNIX 시각으로 변환합니다. risk_ended와 risk_interrupted를 보호자의 위험 해소로 처리하지 않습니다. 과거 로그는 기록으로 저장하고 새 푸시 알림을 발송하지 않습니다. 앱 알림 목록에는 30초 이내의 신규 시작 관측만 잠시 표시하며 모바일 백그라운드 푸시는 이 연결에 포함되지 않습니다. 카메라 미리보기는 앱을 열었을 때만 조회합니다.
 - 다른 아이로 재등록하면 같은 출력/개인화 폴더를 재사용하지 못하도록 차단합니다. 새 모델 배포 폴더와 빈 개인 프로필을 준비하고 `--sky-eye-dir`로 명시해야 합니다. 이전 아이의 파일을 새 폴더에 복사하지 마세요. 등록 키나 커서를 지우는 방식으로 이 검사를 우회하지 않습니다.
 - 상태/커서/피드백 영수증은 소유자 전용 상태 폴더에 저장합니다. Git에 넣지 않습니다. PC 주소가 바뀌면 자동으로 다른 서버를 신뢰하지 않으며 기존 `server.json` 바인딩을 확인해야 합니다.
 
@@ -84,6 +121,9 @@ journalctl --user -u aicoo-sky-eye -f
 python3 -m unittest discover -s raspberry-pi -p 'test_*.py'
 # PC의 localhost:8080 개발 서버에만 가상 계정과 아이를 생성하는 선택 테스트
 python3 raspberry-pi/smoke_bridge_local.py
+python3 raspberry-pi/smoke_camera_local.py  # 검정 테스트 JPEG, 실제 카메라 영상 사용 안 함
 ```
 
 API: `POST /api/v1/device/sky-eye/status`, `POST /events`, `GET /commands`, `POST /commands/{id}/receipt` (모두 같은 `/api/v1/device/sky-eye` 접두사). 기기 토큰으로 소유 아이를 결정합니다. 앱은 사용자 JWT + workspace 헤더로 `GET /api/v1/children/{id}/sky-eye`, `POST /api/v1/children/{id}/sky-eye/feedback`을 호출합니다. 전체 상태 조회는 monitor:live, cry:read, detection:read 권한이 모두 필요하며 피드백은 cry:feedback 및 이메일 인증이 필요합니다.
+
+영상 API: `POST /api/v1/device/camera/frame` (X-Device-Token, X-Frame-Captured-At, image/jpeg, 최대 512 KiB/1920×1080), `GET /api/v1/children/{child}/devices/{device}/camera/frame` (사용자 인증). 새 영상이 없으면 204입니다. 서버는 임의의 파이 URL로 접속하지 않습니다.

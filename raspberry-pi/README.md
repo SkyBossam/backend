@@ -1,6 +1,6 @@
 # Sky Eye 통합 모델 연결
 
-실제 통합 패키지의 `status.json`·`events.jsonl` 전송과 보호자 피드백은 **[SKY_EYE.md](SKY_EYE.md)**를 따르세요. 아래 `run`은 연결 확인용이며, 모델 연결 시 `sky_eye_bridge.py`로 대체합니다.
+실제 통합 패키지의 `status.json`·`events.jsonl` 전송과 보호자 피드백은 **[SKY_EYE.md](SKY_EYE.md)**를 따르세요. 권장 실행은 `bash ~/backend/raspberry-pi/start-aicoo.sh` 하나입니다. 서버 주소 저장, 최초 등록/기존 연결 복구, 모델 실행, 분석·영상 전송을 이어서 처리합니다. 아래 `run`은 연결 확인용입니다.
 
 # 아이쿠 파이 연결
 
