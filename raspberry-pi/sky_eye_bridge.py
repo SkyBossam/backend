@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from urllib.error import URLError
 
 from aicoo_device import Agent, ApiError, AgentLock, parse_time
+from camera_forwarder import CameraForwarder
 
 
 def number(value, low=None, high=None):
@@ -254,7 +255,15 @@ class Bridge:
                             os.unlink(temporary)
         self.agent.write('bridge-commands.json', self.commands)
 
-    def run(self, once=False):
+    def run(self, once=False, preview_port=8765, camera=True):
+        self.forwarder = CameraForwarder(self.agent, preview_port) if camera and not once else None
+        try:
+            self._run(once)
+        finally:
+            if self.forwarder:
+                self.forwarder.stop()
+
+    def _run(self, once=False):
         self.agent.load_key()
         authenticated, delay = False, 3
         while True:
@@ -263,6 +272,8 @@ class Bridge:
                     self.agent.authenticate()
                     self.bind()
                     authenticated = True
+                    if self.forwarder:
+                        self.forwarder.start()
                 self.status()
                 self.events()
                 self.feedback()
@@ -295,13 +306,15 @@ def main():
     parser.add_argument('--sky-eye-dir', default=os.environ.get('SKY_EYE_DIR', '~/sky-eye'))
     parser.add_argument('--allow-http', action='store_true')
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--preview-port', type=int, default=8765)
+    parser.add_argument('--no-camera', action='store_true', help='Send observations only, without preview frames')
     args = parser.parse_args()
     if not args.api_url:
         parser.error('--api-url or AICOO_API_URL is required')
     try:
         agent = Agent(args.api_url, args.state_dir, args.allow_http)
         with AgentLock(agent.state_dir):
-            Bridge(agent, args.sky_eye_dir).run(args.once)
+            Bridge(agent, args.sky_eye_dir).run(args.once, args.preview_port, not args.no_camera)
     except KeyboardInterrupt:
         print('\nStopped. Cursor and device identity are saved.')
     except (ApiError, ValueError, OSError, URLError) as error:

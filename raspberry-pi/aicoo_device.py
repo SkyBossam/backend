@@ -119,8 +119,18 @@ class Agent:
                 raise ValueError("No credential. Pair or authenticate first.")
             headers["X-Device-Token"] = self.credential["accessToken"]
         request = Request(self.api_url + "/api/v1" + path, data=payload, headers=headers)
+        return self._send(request)
+
+    def send_frame(self, captured_at, jpeg):
+        if not self.credential:
+            raise ValueError("Pair the device before streaming.")
+        headers = {"Content-Type": "image/jpeg", "Accept": "application/json",
+                   "X-Device-Token": self.credential["accessToken"], "X-Frame-Captured-At": captured_at}
+        return self._send(Request(self.api_url + "/api/v1/device/camera/frame", data=jpeg, headers=headers), timeout=3)
+
+    def _send(self, request, timeout=15):
         try:
-            with build_opener(NoRedirect()).open(request, timeout=15) as response:
+            with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
                 return json.load(response)
         except HTTPError as error:
             try:
@@ -167,7 +177,7 @@ class Agent:
                 if result.get("accessToken"):
                     self.save_credential(result)
                     (self.state_dir / "pending.json").unlink(missing_ok=True)
-                    print(f"Paired! Device ID: {result['deviceId']}\nRun the 'run' command to stay online.", flush=True)
+                    print(f"Paired! Device ID: {result['deviceId']}\nDevice identity is saved.", flush=True)
                     return
             except ApiError as error:
                 if error.status != 429:
