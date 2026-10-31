@@ -106,22 +106,36 @@ python3 raspberry-pi/sky_eye_bridge.py --allow-http         # 창 유지, 계속
 - 명령은 5분 유효합니다. 만료/실패가 나오면 파이 연결과 울음 서비스를 확인하고 파이 미리보기에서 해당 기록을 확인하세요. 큐 접수만으로 학습 완료를 표시하지 않습니다.
 - `cry-cause-demo.sh`의 시뮬레이션은 실제 추천·기록에 섞이지 않습니다.
 
-## 재부팅 자동 실행 (선택)
+## 항상 대기: 재부팅·터미널 종료 후 자동 연결
 
-제공된 `aicoo-sky-eye.service`는 **사용자 서비스**입니다. ExecStart의 저장소 위치를 실제 경로에 맞추세요. 기본 예시는 `~/backend`이며 위 실행 스크립트가 저장한 설정을 사용합니다. 기존 `bridge.env` 설정도 있으면 읽습니다.
+파이가 켜지면 자동 실행하고 PC 서버가 꺼져 있어도 기다리도록 등록합니다. 터미널에서 실행 중인 전송기는 Ctrl+C로 중지한 뒤 아래 명령을 실행하세요. 이미 설치된 아이쿠 백그라운드 서비스는 설치 과정에서 중지한 뒤 설정을 갱신합니다.
 
 ```bash
-mkdir -p ~/.config/aicoo ~/.config/systemd/user
-chmod 700 ~/.config/aicoo
-printf 'AICOO_API_URL=%s\nSKY_EYE_DIR=%s\n' "$AICOO_API_URL" "$HOME/sky-eye" > ~/.config/aicoo/bridge.env
-chmod 600 ~/.config/aicoo/bridge.env
-cp ~/backend/raspberry-pi/aicoo-sky-eye.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now aicoo-sky-eye
-journalctl --user -u aicoo-sky-eye -f
+bash ~/backend/raspberry-pi/start-aicoo.sh --install-service
 ```
 
-터미널의 전송기를 Ctrl+C로 중지한 뒤 서비스를 시작합니다. 부팅 후 로그인 전부터 사용자 서비스를 실행하려면 Pi의 사용자 linger 설정이 필요합니다. 기존 설치의 실행 설정에 맞춰 적용하세요. 카메라·마이크 서비스의 부팅 설정은 이 서비스가 변경하지 않습니다.
+이번처럼 연결 해제 후 기존 기록을 백업하고 새로 시작하는 경우에는 두 옵션을 함께 사용합니다.
+
+```bash
+bash ~/backend/raspberry-pi/start-aicoo.sh --fresh-profile --install-service
+```
+
+최초 등록·승인은 터미널에서 진행하고, 완료되면 사용자 서비스에 넘깁니다. 로그인 전에도 부팅 시 실행되도록 `loginctl enable-linger`를 설정하므로 처음 한 번 `sudo`에서 **파이 로그인 비밀번호**를 물을 수 있습니다. 스크립트 전체를 sudo로 실행하지 마세요. `aicoo standby service is enabled`가 나오면 터미널을 닫아도 됩니다.
+
+- 파이 재부팅: 저장된 설정·키로 모델과 전송을 자동 시작합니다.
+- 서버 또는 네트워크 중단: 대기·재시도하고 복구되면 다시 전송합니다.
+- 앱에서 연결 해제: 이전 계정으로의 전송을 멈추고 새 승인을 기다립니다. 자동으로 다른 계정에 등록하지 않습니다. 다시 연결할 때는 위 `--fresh-profile --install-service` 명령을 사용합니다.
+- 백업·초기화 옵션은 서비스에 저장하지 않습니다. 재부팅 때마다 학습 기록을 초기화하지 않습니다.
+
+상태 확인, 로그 확인, 자동 대기 끄기:
+
+```bash
+systemctl --user status aicoo-sky-eye --no-pager
+journalctl --user -u aicoo-sky-eye -f
+systemctl --user disable --now aicoo-sky-eye
+```
+
+로그 보기에서 Ctrl+C는 로그 보기만 종료합니다. 마지막 명령은 **아이쿠 전송 서비스**를 끄며, 모델 서비스 자체는 계속 실행됩니다. 직접 단위 파일을 관리할 때는 제공된 `aicoo-sky-eye.service` 템플릿도 사용할 수 있습니다.
 
 ## 처리 규칙과 점검
 

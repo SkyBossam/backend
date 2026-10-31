@@ -1,5 +1,5 @@
 [Unit]
-Description=aicoo Sky Eye file bridge
+Description=aicoo connection standby and model sender
 After=network-online.target sky-eye-export.service sky-eye-cry.service
 
 [Service]
@@ -8,10 +8,10 @@ EnvironmentFile=-%h/.config/aicoo/bridge.env
 Environment=PYTHONUNBUFFERED=1
 # User service; keep the same Linux user and state directory used for pairing.
 # Change this checkout path if your backend repository is elsewhere.
-ExecStart=/usr/bin/python3 %h/backend/raspberry-pi/start_aicoo.py
-Restart=on-failure
-RestartPreventExitStatus=1
-RestartSec=15
+ExecStart=/usr/bin/python3 %h/backend/raspberry-pi/start_aicoo.py --service
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
 UMask=0077
 NoNewPrivileges=true
 

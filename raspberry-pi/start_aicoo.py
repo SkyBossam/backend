@@ -14,6 +14,7 @@ from urllib.request import build_opener
 from aicoo_device import Agent, AgentLock, ApiError, NoRedirect
 from sky_eye_bridge import Bridge
 from model_rebind import fresh_profile
+import background_service
 
 
 def read_config(path):
@@ -96,7 +97,7 @@ def wait_for_server(address, once=False):
             time.sleep(3)
 
 
-def ensure_paired(agent, fresh=False):
+def ensure_paired(agent, fresh=False, unattended=False):
     if (agent.state_dir / 'identity.pem').exists():
         agent.load_key()
         try:
@@ -106,9 +107,13 @@ def ensure_paired(agent, fresh=False):
         except ApiError as error:
             if error.code != 'DEVICE_NOT_PAIRED':
                 raise
+            if unattended:
+                raise ValueError('Device is unlinked. Waiting for a new approved connection; run start-aicoo.sh --fresh-profile --install-service to set it up') from None
             # An unlink/reassignment must not silently transfer a child's old profile.
             if agent.read('bridge-binding.json') and not fresh:
                 raise ValueError('This device was unlinked. Run start-aicoo.sh --fresh-profile to approve a new connection, back up the previous model records, and start fresh.') from None
+    if unattended:
+        raise ValueError('Waiting for first-time pairing. Run start-aicoo.sh --install-service in a terminal')
     print('First-time setup: enter the code below on the device connection page in the aicoo PC app, then approve it.', flush=True)
     agent.pair()
 
@@ -143,10 +148,19 @@ def main():
     parser.add_argument('--no-start-model', action='store_true', help='Use a model that is already running separately')
     parser.add_argument('--no-camera', action='store_true', help='Send analysis data without camera preview frames')
     parser.add_argument('--once', action='store_true', help='Check the connection and send data once')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--install-service', action='store_true', help='Finish setup, enable startup after reboot and keep running in the background')
+    mode.add_argument('--service', action='store_true', help='Unattended mode used by the installed standby service')
     args = parser.parse_args()
     if args.fresh_profile and args.no_start_model:
         parser.error('--fresh-profile must manage the model services; do not combine it with --no-start-model')
+    if args.once and (args.install_service or args.service):
+        parser.error('--once cannot be used with background service mode')
+    if args.service and args.fresh_profile:
+        parser.error('Profile changes require interactive setup, not --service')
     try:
+        if args.install_service:
+            background_service.prepare_install()
         path = Path(args.config).expanduser()
         settings = resolve_settings(args, read_config(path), os.environ)
         # Fail on a missing model before waiting for approval or binding a new identity.
@@ -156,17 +170,24 @@ def main():
         agent = Agent(settings['api_url'], settings['state_dir'], allow_http=settings['api_url'].startswith('http://'))
         with AgentLock(agent.state_dir):
             save_config(path, settings)
-            ensure_paired(agent, fresh=args.fresh_profile)
+            ensure_paired(agent, fresh=args.fresh_profile, unattended=args.service)
             camera = fresh_profile(agent, settings['sky_eye_dir']) if args.fresh_profile else None
             bridge = Bridge(agent, settings['sky_eye_dir'])
             bridge.bind()  # Verify child binding before starting the model or camera relay.
             if not args.no_start_model:
                 start_model(settings['sky_eye_dir'], camera=camera)
-            print('Starting aicoo data and camera transmission. Keep this terminal open. Press Ctrl+C to stop.', flush=True)
-            bridge.run(args.once, settings['preview_port'], not args.no_camera)
+            if not args.install_service:
+                print('Starting aicoo data and camera transmission.' + ('' if args.service else ' Keep this terminal open. Press Ctrl+C to stop.'), flush=True)
+                bridge.run(args.once, settings['preview_port'], not args.no_camera)
+        if args.install_service:
+            # The foreground process releases AgentLock before starting the daemon.
+            background_service.install(Path(__file__), path, args.no_camera, args.no_start_model)
     except KeyboardInterrupt:
         print('\nTransmission stopped. Run the same command to reconnect next time.')
     except (ApiError, ValueError, OSError, URLError, subprocess.CalledProcessError) as error:
+        if args.service:
+            print('aicoo standby: %s. The background service will retry automatically.' % error, file=sys.stderr)
+            return 1
         print('aicoo startup failed: %s' % error, file=sys.stderr)
         print('If another aicoo sender or service is running, stop it first. Do not delete device keys or model profiles.', file=sys.stderr)
         return 1

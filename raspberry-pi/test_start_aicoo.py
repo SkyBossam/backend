@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-from aicoo_device import Agent, ApiError
+from aicoo_device import Agent, AgentLock, ApiError
 from start_aicoo import origin, resolve_settings, save_config, ensure_paired, start_model, main
 
 
@@ -83,6 +83,26 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         self.assertEqual(order, ['pair', 'archive', 'bind', 'model', 'send'])
         start.assert_called_once_with(str(model.resolve()), camera='sky-eye-objects')
+
+    def test_unattended_service_waits_for_owner_and_never_generates_pairing_codes(self):
+        agent = Agent('https://api.example', self.args.state_dir)
+        with patch.object(agent, 'pair') as pair:
+            with self.assertRaisesRegex(ValueError, 'Waiting'): ensure_paired(agent, unattended=True)
+            agent.load_key(create=True)
+            with patch.object(agent, 'authenticate', side_effect=ApiError(401, 'DEVICE_NOT_PAIRED')):
+                with self.assertRaisesRegex(ValueError, 'unlinked'): ensure_paired(agent, unattended=True)
+        pair.assert_not_called()
+
+    def test_service_install_releases_lock_before_starting_the_daemon(self):
+        argv = ['start_aicoo.py', '--api-url', 'http://127.0.0.1:8080', '--state-dir', self.args.state_dir,
+                '--sky-eye-dir', self.args.sky_eye_dir, '--config', str(self.root / 'launcher.json'), '--install-service']
+        model = Path(self.args.sky_eye_dir); model.mkdir(); (model / 'start-all.sh').write_text('fixture')
+        def install(*args):
+            with AgentLock(self.args.state_dir): pass
+        with patch('sys.argv', argv), patch('start_aicoo.health'), patch('start_aicoo.ensure_paired'), patch('start_aicoo.start_model'), patch('start_aicoo.Bridge') as bridge, patch('start_aicoo.background_service.prepare_install') as prepare, patch('start_aicoo.background_service.install', side_effect=install) as installed:
+            self.assertEqual(main(), 0)
+        prepare.assert_called_once(); installed.assert_called_once()
+        bridge.return_value.run.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

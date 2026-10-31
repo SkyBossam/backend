@@ -2,6 +2,8 @@
 
 실제 통합 패키지의 `status.json`·`events.jsonl` 전송과 보호자 피드백은 **[SKY_EYE.md](SKY_EYE.md)**를 따르세요. 권장 실행은 `bash ~/backend/raspberry-pi/start-aicoo.sh` 하나입니다. 서버 주소 저장, 최초 등록/기존 연결 복구, 모델 실행, 분석·영상 전송을 이어서 처리합니다. 아래 `run`은 연결 확인용입니다.
 
+항상 켜 둔 파이에서 재부팅·터미널 종료 후에도 자동 대기하려면 `bash ~/backend/raspberry-pi/start-aicoo.sh --install-service`로 등록합니다. 계정 연결 해제 후 기존 기록을 백업하고 새로 연결할 때는 `--fresh-profile --install-service`를 함께 사용합니다. 날짜 소수점 9자리 때문에 Python 3.9에서 발생하던 `Invalid isoformat string` 오류도 최신 코드에서 수정했습니다.
+
 # 아이쿠 파이 연결
 
 Raspberry Pi 4B에서 보호자 계정과 아이를 연결하는 프로그램입니다. 카메라·USB 헤드셋 드라이버 설정과 영상 송출, AI 추론은 기존 프로그램에서 담당합니다. 이 프로그램은 기기 등록·인증·연결 상태 전송을 담당하며, 분석 결과가 없으면 `unverifiable`를 전송합니다.
