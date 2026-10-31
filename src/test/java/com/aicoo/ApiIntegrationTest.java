@@ -445,6 +445,62 @@ class ApiIntegrationTest {
         response(get("/api/v1/children/"+child+"/devices/"+device+"/camera/frame").header("Authorization","Bearer "+owner.token()).header("X-Workspace-Id",owner.workspace()),204);
     }
 
+    private Map<String,Object> changes(){return p("routines",List.of(),"deletedRoutines",List.of(),"sleepRecords",List.of(),"deletedSleepRecords",List.of(),"feedback",List.of());}
+    @Test void cryHistoryProjectsCandidatesOnceAndSurvivesRebinding()throws Exception{
+        var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"history",200);var credentials=poll(pi,200);String token=credentials.path("accessToken").asText();
+        Instant at=Instant.now().minusSeconds(7200);
+        var ended=p("id","b".repeat(64),"episodeKey","candidate:one","kind","cry_ended","riskType","cry","observedAt",at.plusSeconds(62),"startedAt",at,"endedAt",at.plusSeconds(62));
+        deviceCall("/sky-eye/events",token,ended,200);deviceCall("/sky-eye/events",token,ended,200);
+        deviceCall("/sky-eye/events",token,p("id","a".repeat(64),"episodeKey","candidate:one","kind","cry_started","observedAt",at,"startedAt",at),200);
+        deviceCall("/sky-eye/events",token,p("id","c".repeat(64),"episodeKey","personal:one","kind","cry_episode_ended","observedAt",at.plusSeconds(62),"startedAt",at,"endedAt",at.plusSeconds(62),"episodeUid",UUID.randomUUID(),"endReason","quiet"),200);
+        String path="/children/"+child+"/care-history";
+        var cries=call("GET",path+"?kind=cries",owner,null,200).path("items");assertThat(cries).hasSize(1);assertThat(cries.get(0).path("durationSec").asInt()).isEqualTo(62);
+        assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).isEmpty();
+        var note=p("eventId",cries.get(0).path("id").asText(),"actions",List.of("hug","other:조명을 낮춤"),"note","안고 난 뒤 진정했어요","response","stopped");
+        var body=changes();body.put("feedback",List.of(note));
+        var saved=call("PUT",path,owner,body,"save-note",200);assertThat(call("PUT",path,owner,body,"save-note",200)).isEqualTo(saved);
+        assertThat(call("GET",path+"?kind=feedback",owner,null,200).path("items")).hasSize(1);
+        call("PUT","/children/"+other+"/care-history",owner,body,"other-note",404);
+        call("GET",path+"?kind=cries",outsider,null,404);call("GET",path+"?kind=cries",null,null,401);
+        call("DELETE","/devices/"+credentials.path("deviceId").asText(),owner,null,200);
+        var next=new Pi(pi.keys(),call("POST","/pairing/start",null,proof(pi.keys(),"pair"),200));approve(owner,other,next,"rebound",200);
+        assertThat(call("GET",path+"?kind=cries",owner,null,200).path("items")).isEqualTo(cries);
+        assertThat(call("GET","/children/"+other+"/care-history?kind=cries",owner,null,200).path("items")).isEmpty();
+        assertThat(call("GET","/children/"+child+"/summary?date="+at.atZone(ZoneId.of("Asia/Seoul")).toLocalDate(),owner,null,200).path("cryCount").asInt()).isEqualTo(1);
+    }
+    @Test void dailyRecordsPersistPaginateAndRejectStaleAtomicEdits()throws Exception{
+        var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");String path="/children/"+child+"/care-history";
+        Instant start=Instant.parse("2026-01-20T14:00:00Z");UUID routine=UUID.randomUUID(),sleep=UUID.randomUUID();
+        var r=p("id",routine,"type","play","title","놀이","note","메모","scheduledAt",start,"endedAt",start.plusSeconds(1800),"status","done");
+        var s=p("id",sleep,"startedAt",start,"endedAt",start.plusSeconds(7200));
+        var body=changes();body.put("routines",List.of(r));body.put("sleepRecords",List.of(s));
+        var saved=call("PUT",path,owner,body,"day-one",200);assertThat(saved.path("routines").get(0).path("version").asInt()).isEqualTo(1);
+        assertThat(call("PUT",path,owner,body,"day-one",200)).isEqualTo(saved);
+        var more=changes();more.put("sleepRecords",List.of(p("id",UUID.randomUUID(),"startedAt",start.plusSeconds(3600),"endedAt",start.plusSeconds(10800))));call("PUT",path,owner,more,"day-two",200);
+        var first=call("GET",path+"?kind=sleepRecords&limit=1",owner,null,200);String cursor=first.path("nextCursor").asText();assertThat(cursor).isNotBlank();
+        var second=call("GET",path+"?kind=sleepRecords&limit=1&cursor="+cursor,owner,null,200);assertThat(second.path("items")).hasSize(1);assertThat(second.path("nextCursor").isNull()).isTrue();
+        call("GET","/children/"+other+"/care-history?kind=sleepRecords&cursor="+cursor,owner,null,422);
+        assertThat(call("GET","/children/"+child+"/summary?date=2026-01-20",owner,null,200).path("sleepMinutes").asInt()).isEqualTo(60);
+        assertThat(call("GET","/children/"+child+"/summary?date=2026-01-21",owner,null,200).path("sleepMinutes").asInt()).isEqualTo(120);
+        // The original routine API participates in optimistic version checks too.
+        call("PATCH","/children/"+child+"/routines/"+routine,owner,p("title","다른 기기에서 수정"),200);
+        r.put("version",1);s.put("version",1);s.put("endedAt",start.plusSeconds(4000));body.put("sleepRecords",List.of(s));
+        call("PUT",path,owner,body,"stale-edit",409);
+        assertThat(db.required("SELECT version FROM sleep_records WHERE id=:id",p("id",sleep),"test").get("version")).isEqualTo(1L);
+        var deletion=changes();deletion.put("deletedRoutines",List.of(p("id",routine,"version",2)));
+        call("PUT",path,outsider,deletion,"outsider",404);call("PUT",path,owner,deletion,"delete",200);
+        assertThat(call("GET",path+"?kind=routines",owner,null,200).path("items")).isEmpty();
+        var relogin=call("POST","/auth/login",null,p("email",owner.email(),"password","correct-password-123"),200);
+        var signedIn=new User(relogin.path("accessToken").asText(),relogin.path("refreshToken").asText(),owner.workspace(),owner.member(),owner.user(),owner.email());
+        assertThat(call("GET",path+"?kind=sleepRecords",signedIn,null,200).path("items")).hasSize(2);
+    }
+    @Test void invalidDailyRecordsRollbackAndReadOnlyGrantsCannotWrite()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");String path="/children/"+child+"/care-history";Instant at=Instant.now().minusSeconds(1000);
+        var body=changes();body.put("sleepRecords",List.of(p("id",UUID.randomUUID(),"startedAt",at,"endedAt",at.minusSeconds(1))));call("PUT",path,owner,body,"invalid",422);
+        assertThat(call("GET",path+"?kind=sleepRecords",owner,null,200).path("items")).isEmpty();
+        db.update("UPDATE child_access_grants SET capabilities=cast(:caps as jsonb) WHERE membership_id=:member",p("caps",db.json(List.of("child:read","routine:read","cry:read")),"member",owner.member()));
+        body.put("sleepRecords",List.of(p("id",UUID.randomUUID(),"startedAt",at,"endedAt",at.plusSeconds(60))));call("PUT",path,owner,body,"read-only",403);
+    }
     @Test void invalidPairingAttemptsAreRateLimitedAndPendingPollingSlowsDown()throws Exception{
         var owner=user();for(int i=0;i<10;i++)call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),404);call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),429);
         var pi=pi();poll(pi,200);assertThat(poll(pi,429).path("error").path("code").asText()).isEqualTo("PAIRING_SLOW_DOWN");

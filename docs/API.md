@@ -108,6 +108,32 @@ Analysis:
 
 `POST /children/{id}/stream-token`은 영상 바이트를 반환하지 않습니다. 게이트웨이에 토큰을 Authorization 헤더로 전달하세요. 게이트웨이는 연결 시 및 5초마다 `/internal/stream-tokens/introspect`를 호출하고, 만료·권한 회수·세션 폐기·카메라 단절 시 재생을 종료해야 합니다. 토큰을 쿼리 문자열이나 로그에 남기지 마세요. 기본 구성에는 미디어 게이트웨이가 없습니다.
 
+## 울음·수면·하루 기록
+
+`GET /children/{childId}/care-history?kind=cries|routines|sleepRecords|feedback&limit=100&cursor=...`
+
+응답은 `{items,nextCursor}`입니다. 모든 페이지를 조회해야 전체 이력이 됩니다. `cries`는 종료 시간이 없으면 `durationSec: null`이며, `feedback`은 현재 보호자가 저장한 대응 결과입니다. 기기 연결이 끊기거나 해제되어도 아이에 대한 기록 조회 권한이 있으면 과거 이력을 볼 수 있습니다.
+
+`PUT /children/{childId}/care-history`는 `Idempotency-Key`와 다음 본문을 받습니다. 각 배열은 최대 50개입니다.
+
+```json
+{
+  "routines": [{"id":"클라이언트 UUID","type":"play","title":"놀이 시간","note":"","scheduledAt":"2026-11-01T01:00:00Z","endedAt":"2026-11-01T01:30:00Z","status":"done"}],
+  "deletedRoutines": [],
+  "sleepRecords": [{"id":"클라이언트 UUID","startedAt":"2026-10-31T14:00:00Z","endedAt":"2026-10-31T22:00:00Z"}],
+  "deletedSleepRecords": [],
+  "feedback": [{"eventId":"울음 UUID","actions":["hug"],"note":"안고 난 뒤 진정했어요","response":"stopped"}]
+}
+```
+
+생성에는 버전을 생략하고 수정에는 조회한 `version`을 함께 보냅니다. 삭제 항목은 `{id,version}`입니다. 동시 변경은 `409 CARE_RECORD_CHANGED`이며 한 요청에서 일부만 저장되지 않습니다. 같은 동작 재시도는 키와 본문을 유지합니다. 응답의 `routines`, `sleepRecords`, `feedback`에는 갱신 버전과 서버 저장 시각이 포함됩니다.
+
+일상 기록은 `routine:read/write`, 울음·대응 기록은 `cry:read/feedback`, 공통으로 `child:read`를 검사합니다. 행동은 `sleep`, `hug`, `noise`, `posture`, `diaper`, `none`, `other:자유 입력`이고 `none`은 단독 선택입니다. 모델 학습 명령인 `/sky-eye/feedback`과 일반 돌봄 일지는 별개입니다.
+
+Flyway V7이 기존 Sky Eye 울음 후보를 `detection_events`로 반영하며 새 전송은 트리거로 반영합니다. `(device_id,episodeKey)`별로 시작·종료를 합치고 학습용 에피소드는 중복 집계하지 않습니다. 과거 데이터를 이관할 때 알림을 새로 발송하지 않습니다. 사용자 연결이 바뀌어도 기존 기기 바인딩의 기록을 다른 아이에게 이전하지 않습니다.
+
+수면 기록은 실제 시작·종료가 필요합니다. 하루 요약은 Asia/Seoul 날짜로 자정을 나누고 겹치는 수면 시간을 합쳐 계산합니다. 수면 계획 루틴을 실제 수면으로 간주하지 않습니다. 원시 영상·오디오·학습 임베딩은 이 API에 저장하지 않습니다.
+
 ## 오류와 null
 
 ```json
