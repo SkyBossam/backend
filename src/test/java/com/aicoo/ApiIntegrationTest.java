@@ -322,6 +322,60 @@ class ApiIntegrationTest {
             assertThat(List.of(results.get(0).get(10,TimeUnit.SECONDS),results.get(1).get(10,TimeUnit.SECONDS))).containsExactlyInAnyOrder(200,409);
         }assertThat(db.list("SELECT id FROM devices WHERE identity_id IS NOT NULL",Map.of())).hasSize(1);
     }
+    private Map<String,Object> skyStatus(Instant at,boolean simulation,int feedback,int windows,UUID episode) {
+        return p("observedAt",at,"video",p("available",true,"observedAt",at,"posture","supine","airway","airway_visible","state","normal","bodyConfidence",0.9,"faceConfidence",0.2,"geometryValid",false,"fallState","monitoring"),
+            "audio",p("available",true,"observedAt",at,"cryDetected",true,"babyCryScore",0.4),
+            "personalization",p("simulation",simulation,"state","ready","nFeedback",feedback,"requiredFeedback",10,"cryWindows",windows,"requiredCryWindows",10,"soundOn",false,"recommendations",List.of(p("action","hold","score",0.7)),"recentEpisodes",List.of(p("episodeUid",episode,"startedAt",at.minusSeconds(60),"endedAt",at.minusSeconds(10)))));
+    }
+    @Test void skyEyeUsesDeviceScopeAndExpiresUnsafeOrStaleObservations()throws Exception{
+        var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"sky",200);String token=poll(pi,200).path("accessToken").asText();
+        var body=skyStatus(Instant.now(),false,10,10,UUID.randomUUID());body.put("childId",other);
+        deviceCall("/sky-eye/status",token,body,200);
+        var item=call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0);
+        assertThat(item.path("safety").path("posture").asText()).isEqualTo("stable");assertThat(item.path("safety").path("face").asText()).isEqualTo("unknown");
+        assertThat(item.path("safety").path("objects").asText()).isEqualTo("unknown");assertThat(item.path("safety").path("edge").asText()).isEqualTo("unknown");
+        assertThat(item.path("status").path("personalization").path("recommendations")).hasSize(1);
+        call("GET","/children/"+child+"/sky-eye",outsider,null,404);
+        assertThat(call("GET","/children/"+other+"/sky-eye",owner,null,200).path("items")).isEmpty();
+        db.update("UPDATE sky_eye_status SET body=jsonb_set(body,'{observedAt}',to_jsonb(cast(:at as text)))",p("at",Instant.now().minusSeconds(60).toString()));
+        item=call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0);
+        assertThat(item.path("status").path("video").path("available").asBoolean()).isFalse();assertThat(item.path("status").path("personalization").isNull()).isTrue();
+    }
+    @Test void skyEyeRejectsSimulationAndInsufficientPersonalization()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"sky",200);String token=poll(pi,200).path("accessToken").asText();
+        for(int count:List.of(9,10)) {
+            deviceCall("/sky-eye/status",token,skyStatus(Instant.now(),count==10,count,10,UUID.randomUUID()),200);
+            var personal=call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("status").path("personalization");
+            if(count==10)assertThat(personal.isNull()).isTrue();else assertThat(personal.path("recommendations")).isEmpty();
+        }
+        deviceCall("/sky-eye/status",token,skyStatus(Instant.now(),false,10,9,UUID.randomUUID()),200);
+        assertThat(call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("status").path("personalization").path("recommendations")).isEmpty();
+        deviceCall("/sky-eye/status",token,skyStatus(Instant.now().plusSeconds(100),false,10,10,UUID.randomUUID()),422);
+    }
+    @Test void skyEyeHistoricalEventsDeduplicateAndNeverDispatchAlerts()throws Exception{
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"sky",200);String token=poll(pi,200).path("accessToken").asText();
+        deviceCall("/sky-eye/status",token,skyStatus(Instant.now(),false,0,0,UUID.randomUUID()),200);
+        var event=p("id","a".repeat(64),"episodeKey","source:episode","kind","risk_started","riskType","prone","observedAt",Instant.now().minusSeconds(3600));
+        deviceCall("/sky-eye/events",token,event,200);assertThat(deviceCall("/sky-eye/events",token,event,200).path("duplicate").asBoolean()).isTrue();
+        var items=call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("events");assertThat(items).hasSize(1);assertThat(items.get(0).path("recent").asBoolean()).isFalse();
+        assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).isEmpty();
+        event.put("kind","risk_ended");deviceCall("/sky-eye/events",token,event,409);
+    }
+    @Test void skyEyeFeedbackNeedsCompletedEpisodeAndActualReceiptAndUnlinkRevokesAccess()throws Exception{
+        var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),episode=UUID.randomUUID();var pi=pi();approve(owner,child,pi,"sky",200);var credentials=poll(pi,200);String token=credentials.path("accessToken").asText();UUID device=uuid(credentials,"deviceId");
+        deviceCall("/sky-eye/status",token,skyStatus(Instant.now(),false,0,0,episode),200);
+        var body=p("deviceId",device,"episodeUid",UUID.randomUUID(),"action","hold");call("POST","/children/"+child+"/sky-eye/feedback",owner,body,422);body.put("episodeUid",episode);
+        call("POST","/children/"+child+"/sky-eye/feedback",outsider,body,404);
+        var queued=call("POST","/children/"+child+"/sky-eye/feedback",owner,body,200);assertThat(queued.path("status").asText()).isEqualTo("queued");assertThat(call("POST","/children/"+child+"/sky-eye/feedback",owner,body,200)).isEqualTo(queued);
+        assertThat(deviceCall("/sky-eye/commands",token,null,200).path("items")).hasSize(1);
+        String receipt="/sky-eye/commands/"+queued.path("id").asText()+"/receipt";
+        assertThat(deviceCall(receipt,token,p("ok",true),200).path("status").asText()).isEqualTo("applied");deviceCall(receipt,token,p("ok",true),200);
+        assertThat(deviceCall("/sky-eye/commands",token,null,200).path("items")).isEmpty();
+        body.put("action","feed");call("POST","/children/"+child+"/sky-eye/feedback",owner,body,409);
+        call("DELETE","/devices/"+device,owner,null,200);deviceCall("/sky-eye/commands",token,null,401);
+        assertThat(call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items")).isEmpty();
+    }
+
     @Test void invalidPairingAttemptsAreRateLimitedAndPendingPollingSlowsDown()throws Exception{
         var owner=user();for(int i=0;i<10;i++)call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),404);call("POST","/device-pairings/inspect",owner,p("code","ZZZZ-ZZZZ"),429);
         var pi=pi();poll(pi,200);assertThat(poll(pi,429).path("error").path("code").asText()).isEqualTo("PAIRING_SLOW_DOWN");
