@@ -116,6 +116,11 @@ public class SkyEyeService {
     }
     private void observeCry(UUID device,Audio audio) {
         db.list("SELECT observe_sky_eye_cry(:device,cast(:audio as jsonb))",p("device",device,"audio",db.json(audio)));
+        if(audio.available() && audio.cryDetected()) cryRecord(device,audio).ifPresent(e -> outbox.enqueue(e,"detection.created"));
+    }
+    private Optional<Map<String,Object>> cryRecord(UUID device,Audio audio) {
+        if(!audio.available() || !audio.cryDetected() || audio.observedAt()==null) return Optional.empty();
+        return db.one("SELECT * FROM detection_events WHERE source_id=:device AND type='cry' AND NOT cry_retired AND started_at<=:at AND (ended_at IS NULL OR ended_at>=:at) AND last_observed_at>=:at ORDER BY started_at DESC,id DESC LIMIT 1",p("device",device,"at",audio.observedAt()));
     }
     public Object snapshot(Actor actor,UUID child) {
         policy.require(actor,child,"monitor:live");policy.require(actor,child,"cry:read");policy.require(actor,child,"detection:read");
@@ -129,7 +134,7 @@ public class SkyEyeService {
             var events=db.list("SELECT body,received_at FROM sky_eye_events WHERE device_id=:device ORDER BY observed_at DESC,event_id LIMIT 30",p("device",device));
             var eventViews=events.stream().map(e->{var event=mapper.convertValue(e.get("body"),Event.class);return p("event",event,"recent",fresh(event.observedAt(),now,30)&&fresh(instant(e,"received_at"),now,30));}).toList();
             var commands=db.list("SELECT id,episode_uid,action,CASE WHEN status='queued' AND expires_at<now() THEN 'expired' ELSE status END AS status FROM sky_eye_commands WHERE device_id=:device ORDER BY created_at DESC LIMIT 20",p("device",device)).stream().map(c->view(c,"id","episode_uid","action","status")).toList();
-            items.add(p("deviceId",device,"name",row.get("display_name"),"connected",connected,"reportState",reportState,"lastReportAt",row.get("received_at"),"camera",camera.state(device),"status",status,"safety",safety(status),"events",eventViews,"commands",commands));
+            items.add(p("deviceId",device,"name",row.get("display_name"),"connected",connected,"reportState",reportState,"lastReportAt",row.get("received_at"),"camera",camera.state(device),"cryEventId",cryRecord(device,status.audio()).map(e -> e.get("id")).orElse(null),"status",status,"safety",safety(status),"events",eventViews,"commands",commands));
         }
         return p("childId",child,"items",items,"serverTime",now);
     }

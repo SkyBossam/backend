@@ -418,6 +418,41 @@ class ApiIntegrationTest {
             "audio",p("available",true,"observedAt",at,"cryDetected",true,"babyCryScore",0.4),
             "personalization",p("simulation",simulation,"state","ready","nFeedback",feedback,"requiredFeedback",10,"cryWindows",windows,"requiredCryWindows",10,"soundOn",false,"recommendations",List.of(p("action","hold","score",0.7)),"recentEpisodes",List.of(p("episodeUid",episode,"startedAt",at.minusSeconds(60),"endedAt",at.minusSeconds(10)))));
     }
+    @Test void liveCryStatusCreatesLinkedDetailWithoutStartEventAndDelayedStartKeepsId() throws Exception {
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"status-only",200);
+        String token=poll(pi,200).path("accessToken").asText();Instant at=Instant.now().minusSeconds(2);
+        var body=skyStatus(at,false,0,0,UUID.randomUUID());
+        deviceCall("/sky-eye/status",token,body,200);deviceCall("/sky-eye/status",token,body,200);
+        String path="/children/"+child+"/care-history?kind=cries";
+        var records=call("GET",path,owner,null,200).path("items");assertThat(records).hasSize(1);
+        String id=records.get(0).path("id").asText();
+        assertThat(records.get(0).path("audioAnalysis").path("cryDetected").asBoolean()).isTrue();
+        assertThat(call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("cryEventId").asText()).isEqualTo(id);
+        var start=p("id","f".repeat(64),"episodeKey","delayed-real-start","kind","cry_started","observedAt",at.minusSeconds(1));
+        deviceCall("/sky-eye/events",token,start,200);deviceCall("/sky-eye/events",token,start,200);
+        deviceCall("/sky-eye/status",token,skyStatus(at.plusSeconds(1),false,0,0,UUID.randomUUID()),200);
+        records=call("GET",path,owner,null,200).path("items");assertThat(records).hasSize(1);
+        assertThat(records.get(0).path("id").asText()).isEqualTo(id);
+        assertThat(Instant.parse(records.get(0).path("startedAt").asText())).isEqualTo(at.minusSeconds(1).truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+        assertThat(db.list("SELECT id FROM outbox_messages",Map.of())).hasSize(1);
+    }
+    @Test void missingOrStaleAudioDoesNotCreateCryAndQuietEndsStatusOnlyOccurrence() throws Exception {
+        var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"status-quiet",200);
+        String token=poll(pi,200).path("accessToken").asText();Instant at=Instant.now().minusSeconds(3);
+        deviceCall("/sky-eye/status",token,skyStatus(at.minusSeconds(60),false,0,0,UUID.randomUUID()),200);
+        String path="/children/"+child+"/care-history?kind=cries";
+        assertThat(call("GET",path,owner,null,200).path("items")).isEmpty();
+        deviceCall("/sky-eye/status",token,skyStatus(at,false,0,0,UUID.randomUUID()),200);
+        for(int seconds:new int[]{1,4}) {
+            var quiet=skyStatus(at.plusSeconds(seconds),false,0,0,UUID.randomUUID());
+            quiet.put("audio",p("available",true,"observedAt",at.plusSeconds(seconds),"cryDetected",false));
+            deviceCall("/sky-eye/status",token,quiet,200);
+        }
+        var record=call("GET",path,owner,null,200).path("items").get(0);
+        assertThat(record.path("observationState").asText()).isEqualTo("ended");
+        assertThat(record.path("alertClosed").asBoolean()).isFalse();
+        assertThat(call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("cryEventId").isNull()).isTrue();
+    }
     @Test void skyEyeUsesDeviceScopeAndExpiresUnsafeOrStaleObservations()throws Exception{
         var owner=user();var outsider=user();UUID child=uuid(child(owner),"id"),other=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"sky",200);String token=poll(pi,200).path("accessToken").asText();
         var body=skyStatus(Instant.now(),false,10,10,UUID.randomUUID());body.put("childId",other);
@@ -445,7 +480,9 @@ class ApiIntegrationTest {
     }
     @Test void skyEyeHistoricalEventsDeduplicateAndNeverDispatchAlerts()throws Exception{
         var owner=user();UUID child=uuid(child(owner),"id");var pi=pi();approve(owner,child,pi,"sky",200);String token=poll(pi,200).path("accessToken").asText();
-        deviceCall("/sky-eye/status",token,skyStatus(Instant.now(),false,0,0,UUID.randomUUID()),200);
+        Instant now=Instant.now();var quiet=skyStatus(now,false,0,0,UUID.randomUUID());
+        quiet.put("audio",p("available",true,"observedAt",now,"cryDetected",false));
+        deviceCall("/sky-eye/status",token,quiet,200);
         var event=p("id","a".repeat(64),"episodeKey","source:episode","kind","risk_started","riskType","prone","observedAt",Instant.now().minusSeconds(3600));
         deviceCall("/sky-eye/events",token,event,200);assertThat(deviceCall("/sky-eye/events",token,event,200).path("duplicate").asBoolean()).isTrue();
         var items=call("GET","/children/"+child+"/sky-eye",owner,null,200).path("items").get(0).path("events");assertThat(items).hasSize(1);assertThat(items.get(0).path("recent").asBoolean()).isFalse();
